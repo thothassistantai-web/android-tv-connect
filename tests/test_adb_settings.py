@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, ".")
 from android_tv_connect.adb_client import AdbClient
 from android_tv_connect.adb_settings import (
+    migrate_legacy_adb_defaults,
     normalize_adb_config,
     normalize_wired_serial,
     normalize_wireless_host,
@@ -17,9 +18,26 @@ from android_tv_connect.adb_settings import (
     wireless_host_is_auto,
 )
 from android_tv_connect.config import AdbConfig
+from android_tv_connect.connection_ui import LEGACY_WIRED_SERIAL, LEGACY_WIRELESS_HOST
 
 
 class AdbSettingsTests(unittest.TestCase):
+    def test_config_defaults_are_auto(self) -> None:
+        adb = AdbConfig()
+        self.assertEqual(adb.wired_serial, "")
+        self.assertEqual(adb.wireless_host, "")
+
+    def test_migrate_legacy_defaults(self) -> None:
+        adb = migrate_legacy_adb_defaults(
+            AdbConfig(wired_serial=LEGACY_WIRED_SERIAL, wireless_host=LEGACY_WIRELESS_HOST)
+        )
+        self.assertEqual(adb.wired_serial, "")
+        self.assertEqual(adb.wireless_host, "")
+
+    def test_migrate_preserves_custom_serial(self) -> None:
+        adb = migrate_legacy_adb_defaults(AdbConfig(wired_serial="CUSTOM999"))
+        self.assertEqual(adb.wired_serial, "CUSTOM999")
+
     def test_normalize_wired_serial_auto_values(self) -> None:
         self.assertEqual(normalize_wired_serial(""), "")
         self.assertEqual(normalize_wired_serial("auto"), "")

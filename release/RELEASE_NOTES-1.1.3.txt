@@ -1,1 +1,8 @@
-Seamless UX Phase 1: neutral ADB defaults, clearer connection status chips, Refresh & connect, hot-plug toast, and mismatch banner when multiple devices are visible.
+Phase 1 seamless connection UX (v1.1.3).
+
+- Neutral ADB defaults: auto-discover first USB / wireless device; legacy dev serials migrate on load.
+- Header chips show capture node and ADB serial with transport; ADB chip refreshes and reconnects.
+- Hot-plug toast when configured USB serial vanishes and one new device appears (Switch / Dismiss).
+- Mismatch banner when capture is active, multiple ADB devices visible, and wired serial is not auto.
+- Settings labels: Auto (first USB), Auto (first wireless); note that capture and ADB are independent.
+- Strategy doc: docs/SEAMLESS-UX.md

@@ -135,26 +135,6 @@ class VideoSurface(Gtk.Box):
         self._capture_banner.set_child(banner_box)
         self._overlay_container.add_overlay(self._capture_banner)
 
-        self._mismatch_banner = Gtk.Revealer()
-        self._mismatch_banner.set_reveal_child(False)
-        self._mismatch_banner.set_valign(Gtk.Align.START)
-        self._mismatch_banner.set_halign(Gtk.Align.FILL)
-        self._mismatch_banner.set_margin_top(48)
-        self._mismatch_banner.set_margin_start(12)
-        self._mismatch_banner.set_margin_end(12)
-        mismatch_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        mismatch_box.add_css_class("caption")
-        mismatch_box.add_css_class("control-banner")
-        self._mismatch_banner_label = Gtk.Label(xalign=0.0)
-        self._mismatch_banner_label.set_wrap(True)
-        self._mismatch_banner_label.set_hexpand(True)
-        mismatch_box.append(self._mismatch_banner_label)
-        mismatch_dismiss = Gtk.Button(label="Dismiss")
-        mismatch_dismiss.connect("clicked", lambda *_: self._host.dismiss_mismatch_banner())
-        mismatch_box.append(mismatch_dismiss)
-        self._mismatch_banner.set_child(mismatch_box)
-        self._overlay_container.add_overlay(self._mismatch_banner)
-
         self._hint_revealer = Gtk.Revealer()
         self._hint_revealer.set_reveal_child(False)
         self._hint_revealer.set_valign(Gtk.Align.END)
@@ -431,6 +411,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._scrcpy_launch_pending = False
         self._known_usb_serials: set[str] = set()
         self._hotplug_dismissed: set[str] = set()
+        self._mismatch_dismissed = False
 
         self.set_title(APP_NAME)
         self.set_icon_name(ICON_NAME)
@@ -459,6 +440,9 @@ class MainWindow(Adw.ApplicationWindow):
         self._mismatch_banner_label.set_wrap(True)
         self._mismatch_banner_label.set_hexpand(True)
         mismatch_box.append(self._mismatch_banner_label)
+        mismatch_dismiss = Gtk.Button(label="Dismiss")
+        mismatch_dismiss.connect("clicked", lambda *_: self.dismiss_mismatch_banner())
+        mismatch_box.append(mismatch_dismiss)
         self._mismatch_banner.set_child(mismatch_box)
         root.append(self._mismatch_banner)
 
@@ -532,7 +516,6 @@ class MainWindow(Adw.ApplicationWindow):
         self._known_usb_serials = set(self._adb.list_usb_serials())
         self._update_status_dots()
         GLib.timeout_add_seconds(2, self._status_tick)
-        GLib.timeout_add_seconds(30, self._hotplug_poll)
 
         self._capture.attach_video_widget(self._video.video_host)
         if not self._capture.start():
@@ -595,6 +578,10 @@ class MainWindow(Adw.ApplicationWindow):
             source=source,
         )
 
+    def dismiss_mismatch_banner(self) -> None:
+        self._mismatch_dismissed = True
+        self._mismatch_banner.set_reveal_child(False)
+
     def refresh_and_connect(self) -> None:
         threading.Thread(
             target=self._refresh_connect_worker,
@@ -613,6 +600,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_refresh_connect_done(self, connected: bool, capture_ok: bool) -> bool:
         self._known_usb_serials = set(self._adb.list_usb_serials())
+        self._mismatch_dismissed = False
         self._update_status_dots()
         if connected:
             serial = self._adb.active_serial()
@@ -696,10 +684,6 @@ class MainWindow(Adw.ApplicationWindow):
         toast.connect("button-clicked", on_switch)
         toast.connect("dismissed", on_dismissed)
         self._toast_overlay.add_toast(toast)
-
-    def _hotplug_poll(self) -> bool:
-        self._check_hotplug()
-        return True
 
     def open_settings(self) -> None:
         self.set_input_mode(InputMode.LOCAL, source="settings")
@@ -872,12 +856,6 @@ class MainWindow(Adw.ApplicationWindow):
         threading.Thread(target=self._mirror_launch_worker, daemon=True).start()
 
     def on_adb_chip_clicked(self) -> None:
-        if self._adb.is_connected():
-            if self._input_mode == InputMode.LOCAL:
-                self.set_input_mode(InputMode.REMOTE, source="adb_chip")
-            else:
-                self.set_input_mode(InputMode.LOCAL, source="adb_chip")
-            return
         self.refresh_and_connect()
 
     def on_capture_chip_clicked(self) -> None:
@@ -916,14 +894,6 @@ class MainWindow(Adw.ApplicationWindow):
             ),
         )
 
-        if adb_connected:
-            action_hint = (
-                "click to take remote control"
-                if self._input_mode == InputMode.LOCAL
-                else "click to release control"
-            )
-        else:
-            action_hint = "click Refresh & connect"
         self._compact_header.set_chip_label(
             self._compact_header.adb_chip,
             format_adb_chip_label(
@@ -938,7 +908,7 @@ class MainWindow(Adw.ApplicationWindow):
                 connected=adb_connected,
                 serial=adb_serial,
                 is_wireless=adb_wireless,
-                action_hint=action_hint,
+                action_hint="click to refresh & connect",
             ),
         )
 
@@ -960,14 +930,17 @@ class MainWindow(Adw.ApplicationWindow):
 
         usb_serials = self._adb.list_usb_serials()
         wireless_count = len(self._adb.list_wireless_devices())
-        mismatch = capture_adb_mismatch_warning(
-            capture_usb_present=is_capture_usb_present(self._config.capture),
-            adb_connected=adb_connected,
-            adb_serial=adb_serial,
-            adb_is_wireless=adb_wireless,
-            usb_serials=usb_serials,
-            wireless_count=wireless_count,
-        )
+        wired_auto = not self._config.adb.wired_serial.strip()
+        mismatch = None
+        if not self._mismatch_dismissed and not wired_auto:
+            mismatch = capture_adb_mismatch_warning(
+                capture_usb_present=is_capture_usb_present(self._config.capture),
+                adb_connected=adb_connected,
+                adb_serial=adb_serial,
+                adb_is_wireless=adb_wireless,
+                usb_serials=usb_serials,
+                wireless_count=wireless_count,
+            )
         if mismatch:
             self._mismatch_banner_label.set_text(mismatch)
             self._mismatch_banner.set_reveal_child(True)
@@ -988,6 +961,7 @@ class MainWindow(Adw.ApplicationWindow):
         return False
 
     def _status_tick(self) -> bool:
+        self._check_hotplug()
         self._update_status_dots()
         return True
 

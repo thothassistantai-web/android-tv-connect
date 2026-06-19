@@ -1,99 +1,91 @@
-# Seamless connection UX
+# Seamless UX Strategy
 
-Android TV Connect pairs **HDMI capture** (what you see) with **ADB** (how you control the device). Those two paths are independent today — swapping capture cards or Android sticks should never leave you fighting stale defaults.
+Android TV Connect pairs **HDMI capture** (video/audio from a MacroSilicon dongle) with **ADB** (remote control). Those paths are independent: capture does not imply which ADB device is targeted, and ADB does not require capture. This document describes a phased plan to make connection setup feel automatic while keeping explicit control when needed.
 
-This document is the phased plan for making plug-in, swap, and reconnect feel obvious instead of fiddly.
+## Principles
 
----
+- **Neutral defaults** — new installs use auto-discovery (`wired_serial: ""`, `wireless_host: ""`) instead of developer-specific serials.
+- **Capture ≠ ADB** — UI and settings always treat video and control as separate concerns.
+- **Refresh on demand** — the header ADB chip re-scans devices, invalidates capture cache, and reconnects.
+- **Gentle guidance** — banners and toasts surface ambiguity (multiple devices, hot-plug) without blocking normal use.
 
-## Vision
-
-One **connection orchestrator** keeps capture and ADB in sync with what is actually plugged in, surfaces clear status in the header, and nudges you only when something looks wrong — not on every launch.
+## Phased rollout
 
 ```mermaid
 flowchart TB
-    subgraph inputs [Physical inputs]
-        CAP[HDMI capture USB]
-        ADB_USB[ADB USB]
-        ADB_WIFI[ADB wireless]
+    subgraph phase1 [Phase 1 — Connection clarity]
+        P1A[Neutral config defaults]
+        P1B[Header chips with serial / transport / node]
+        P1C[ADB chip → Refresh and connect]
+        P1D[Hot-plug toast Switch / Dismiss]
+        P1E[Mismatch banner when not auto]
+        P1F[Settings labels Auto first USB / wireless]
     end
 
-    subgraph orchestrator [Connection orchestrator]
-        SCAN[Scan devices]
-        CACHE[Invalidate stale cache]
-        MATCH[Match profile / auto rules]
-        CONNECT[Connect ADB + capture]
-        STATUS[Header chips + banners]
+    subgraph phase2 [Phase 2 — Smarter discovery]
+        P2A[Remember last-good device per transport]
+        P2B[Pair capture USB port with ADB serial heuristics]
+        P2C[Settings device list shows model and transport]
     end
 
-    subgraph ui [User-facing]
-        REFRESH[Refresh and connect]
-        TOAST[Hot-plug toast]
-        SETTINGS[Settings / profiles]
+    subgraph phase3 [Phase 3 — Hands-off operation]
+        P3A[Watch service auto-launch on dongle + ADB ready]
+        P3B[Wireless ADB pairing wizard]
+        P3C[One-click “fix my connection” recovery flow]
     end
 
-    CAP --> SCAN
-    ADB_USB --> SCAN
-    ADB_WIFI --> SCAN
-    SCAN --> CACHE
-    CACHE --> MATCH
-    MATCH --> CONNECT
-    CONNECT --> STATUS
-    REFRESH --> CACHE
-    STATUS --> TOAST
-    SETTINGS --> MATCH
+    phase1 --> phase2 --> phase3
 ```
 
----
+### Phase 1 (v1.1.3) — Connection clarity
 
-## Phase 1 — Quick wins (shipped in 1.1.3)
+| Area | Behavior |
+|------|----------|
+| Defaults | Empty serial/host = auto; legacy dev serials migrate on load |
+| Header | Capture chip shows V4L2 node; ADB chip shows serial + USB/Wi‑Fi |
+| ADB chip click | Invalidate capture cache, `adb devices`, reconnect, toast |
+| Hot-plug | Configured USB serial vanished + exactly one new USB → Switch toast |
+| Mismatch | Banner when capture present, multiple ADB targets, wired serial not auto |
+| Settings | “Auto (first USB)”, “Auto (first wireless)”; capture/ADB note |
 
-**Goal:** Works out of the box on any desk — no baked-in serials or IPs.
+### Phase 2 — Smarter discovery
 
-| Area | What changed |
-|------|----------------|
-| **Neutral defaults** | New installs use auto ADB (`wired_serial` / `wireless_host` empty). Old dev-host defaults migrate to auto on load without touching custom values. |
-| **Status chips** | Header shows active capture node and ADB target (serial/IP + USB vs Wi‑Fi). Tooltips spell out transport. |
-| **Refresh & connect** | One header action: flush capture cache, re-scan ADB, reconnect with your prefer-wired setting. Optional success toast. |
-| **Mismatch banner** | When capture USB is present and multiple ADB devices are visible, a simple banner asks you to confirm the right target. |
-| **Hot-plug lite** | On window focus and every 30s: if your watched serial vanishes and exactly one new USB device appears, a non-blocking toast offers **Switch** or **Dismiss** (dismiss lasts the session). |
-| **Settings copy** | Clearer auto labels; capture section notes that video and ADB are independent (this doc linked). |
+- Persist last successful wired serial and wireless host when auto mode connects.
+- Correlate USB topology (capture dongle vs debug cable) to suggest the right ADB target.
+- Richer device rows in Settings (product name, transport, last seen).
 
-**Not in Phase 1:** saved device profiles, pairing capture card + stick as one unit, embedded mirror, first-run wizard.
+### Phase 3 — Hands-off operation
 
----
+- Extend the systemd user watcher to launch the app when capture + ADB are both ready.
+- Guided wireless debugging setup (pairing code, port, firewall hints).
+- Single “Recover connection” action that retries capture, ADB, and scrcpy in order.
 
-## Phase 2 — Device profiles
+## User flows
 
-**Goal:** One named profile per desk setup (e.g. “living-room stick”, “bench FHD card”).
+### First launch (auto mode)
 
-- **Profile fields:** label, capture `video_device` / USB id, ADB wired serial, wireless host/port, prefer-wired flag.
-- **Profile picker** in header or settings; last-used profile on launch.
-- **Optional pairing:** “This capture card usually goes with this ADB serial” — suggest or auto-select when both appear.
-- **Import/export** profiles as JSON for backup when swapping hardware.
+1. User plugs capture dongle and enables USB debugging on the TV stick.
+2. App starts with empty ADB settings → first USB device wins.
+3. Header chips show live capture node and connected serial.
+4. Click **ADB** any time to force a full refresh.
 
----
+### Multiple Android devices
 
-## Phase 3 — Polish and invisible maintenance
+1. User sets a specific wired serial in Settings (not auto).
+2. If capture is active and `adb devices` lists more than one target, a dismissible banner warns to confirm the match.
+3. Hot-plug: if the configured serial disappears and exactly one new USB device appears, a toast offers **Switch** or dismiss.
 
-**Goal:** Feels like a single appliance, not a dev tool.
+## Configuration reference
 
-- **Embedded mirror** — scrcpy (or successor) in-pane instead of a separate window where practical.
-- **First-run wizard** — detect capture + ADB, walk through auto vs manual, test remote control.
-- **Updates banner** — unobtrusive “update available” in chrome; install via existing launcher without modal interruption.
+| Key | Empty / Auto meaning |
+|-----|----------------------|
+| `adb.wired_serial` | First USB ADB device in `device` state |
+| `adb.wireless_host` | First wireless entry from `adb devices`, or network scan on connect |
+| `capture.video_device` | Auto-resolve MacroSilicon V4L2 node |
 
----
-
-## Tips for swapping hardware
-
-1. Click **Refresh & connect** after plugging in a new stick or capture card.
-2. If the mismatch banner appears, open **Settings → ADB Connection** and pick the correct USB device.
-3. Capture and ADB are **independent** — HDMI can show one stick while ADB controls another until you align them in settings.
-4. Use **Auto (first USB device)** when only one stick is on the bench; pin a serial when you routinely have several connected.
-
----
+Legacy installs that still have the old dev defaults (`FUSA2541006925`, `192.168.1.157`) are migrated to auto on load; custom values are never overwritten.
 
 ## Related docs
 
-- [SCRCPY.md](SCRCPY.md) — screen mirror options
-- [UPDATES.md](UPDATES.md) — launcher update flow
+- [UPDATES.md](UPDATES.md) — release and in-app update flow
+- [SCRCPY.md](SCRCPY.md) — optional screen mirror window

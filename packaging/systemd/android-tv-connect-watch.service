@@ -1,0 +1,14 @@
+[Unit]
+Description=Android TV Connect device watcher
+Documentation=file://%h/.local/share/android-tv-connect/README.md
+After=graphical-session.target pipewire.service
+Wants=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/android-tv-connect --watch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

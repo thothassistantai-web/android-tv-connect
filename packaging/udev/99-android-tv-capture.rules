@@ -1,0 +1,9 @@
+# MacroSilicon MS2109 HDMI capture dongle (USB 534d:2109)
+# Grants logged-in users access without root for V4L2 and USB hotplug detection.
+
+SUBSYSTEM=="usb", ATTR{idVendor}=="534d", ATTR{idProduct}=="2109", TAG+="uaccess"
+
+SUBSYSTEM=="video4linux", ATTRS{idVendor}=="534d", ATTRS{idProduct}=="2109", TAG+="uaccess"
+
+# Fallback match by product name on some kernels/drivers
+SUBSYSTEM=="video4linux", ATTR{name}=="USB3.0 Capture", TAG+="uaccess"

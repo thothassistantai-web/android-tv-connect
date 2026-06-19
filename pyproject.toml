@@ -1,0 +1,31 @@
+[project]
+name = "android-tv-connect"
+version = "1.0.0"
+description = "Stream and control an Android TV stick over HDMI capture and ADB"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Android TV Connect contributors" }]
+keywords = ["android", "tv", "adb", "hdmi", "capture", "remote", "gtk4"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications :: GTK",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Video",
+]
+
+[project.scripts]
+android-tv-connect = "android_tv_connect.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["android_tv_connect*"]
+
+[tool.setuptools.package-data]
+android_tv_connect = ["VERSION"]

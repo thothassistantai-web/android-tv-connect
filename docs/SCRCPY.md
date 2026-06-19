@@ -32,7 +32,7 @@ scrcpy runs in a separate window; HDMI capture in the main app is unchanged.
 | Auto-launch on ADB connect | off | Opens scrcpy when a device connects |
 | scrcpy path | (PATH) | Override if scrcpy is not on PATH |
 | Max size | 1920 | Longest edge in pixels; `0` = native |
-| Video bit rate | 8M | Passed to `--video-bit-rate` |
+| Video bit rate | 8M | `--bit-rate` on scrcpy 1.x, `--video-bit-rate` on 2.x+ |
 | Window title | Android TV Connect | scrcpy window title |
 | Start fullscreen | off | `--fullscreen` |
 | No audio | on | Recommended for TV sticks |
@@ -75,7 +75,7 @@ Confirm `adb devices -l` shows the TV at the configured IP:port. Use **Settings 
 
 **scrcpy exits immediately**
 
-Check the app log (`journalctl` if launched via systemd watch) for `scrcpy:` lines. Common causes: unauthorized USB debugging, another scrcpy instance, or insufficient encoder support on the stick.
+Check the app log (`journalctl` if launched via systemd watch) for `scrcpy:` lines. Common causes: unsupported flags for your scrcpy version (the app adapts to 1.x vs 2.x automatically), unauthorized USB debugging, another scrcpy instance, or insufficient encoder support on the stick. A dialog shows the last scrcpy output when it fails within a few seconds.
 
 ## Logs
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import replace
 
 import gi
@@ -51,7 +52,13 @@ from .input_controller import (
     mode_hint,
 )
 from .shortcuts import bind_shortcuts, humanize_shortcut, key_event_matches
-from .scrcpy_manager import ScrcpySession, is_scrcpy_available, resolve_scrcpy_target
+from .scrcpy_manager import (
+    SCRCPY_RELAUNCH_COOLDOWN_S,
+    ScrcpySession,
+    format_scrcpy_exit_message,
+    is_scrcpy_available,
+    resolve_scrcpy_target,
+)
 from .settings_dialog import SettingsDialog
 from .settings_store import load_config, save_config
 
@@ -407,8 +414,13 @@ class MainWindow(Adw.ApplicationWindow):
         self._mouse_mode = config.input.default_pointer_mode == "mouse"
         self._input_mode = InputMode.LOCAL
         self._settings_dialog: SettingsDialog | None = None
-        self._scrcpy = ScrcpySession(on_state_change=self._on_scrcpy_state_changed)
+        self._scrcpy = ScrcpySession(
+            on_state_change=self._on_scrcpy_state_changed,
+            on_quick_exit=self._on_scrcpy_quick_exit,
+        )
         self._scrcpy_launch_pending = False
+        self._scrcpy_cooldown_until = 0.0
+        self._scrcpy_user_stopped = False
         self._known_usb_serials: set[str] = set()
         self._hotplug_dismissed: set[str] = set()
         self._mismatch_dismissed = False
@@ -795,8 +807,15 @@ class MainWindow(Adw.ApplicationWindow):
 
     def on_mirror_chip_clicked(self) -> None:
         if self._scrcpy.is_running():
+            self._scrcpy_user_stopped = True
             self.stop_mirror()
             return
+        if self._scrcpy_launch_pending:
+            return
+        if time.monotonic() < self._scrcpy_cooldown_until:
+            return
+        self._scrcpy_user_stopped = False
+        self._scrcpy_launch_pending = True
         threading.Thread(target=self._mirror_launch_worker, daemon=True).start()
 
     def toggle_mirror(self) -> None:
@@ -804,6 +823,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def stop_mirror(self) -> None:
         self._scrcpy.stop()
+        self._scrcpy_launch_pending = False
         self._update_status_dots()
 
     def _mirror_launch_worker(self) -> None:
@@ -834,19 +854,44 @@ class MainWindow(Adw.ApplicationWindow):
         self._update_status_dots()
         return False
 
+    def _on_scrcpy_quick_exit(self, exit_code: int, log_lines: list[str]) -> None:
+        GLib.idle_add(self._on_scrcpy_quick_exit_idle, exit_code, log_lines)
+
+    def _on_scrcpy_quick_exit_idle(
+        self,
+        exit_code: int,
+        log_lines: list[str],
+    ) -> bool:
+        self._scrcpy_launch_pending = False
+        self._scrcpy_cooldown_until = time.monotonic() + SCRCPY_RELAUNCH_COOLDOWN_S
+        self._update_status_dots()
+        message = format_scrcpy_exit_message(exit_code, log_lines)
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading="Screen mirror stopped",
+            body=message,
+        )
+        dialog.add_response("ok", "OK")
+        dialog.present()
+        return False
+
     def _on_scrcpy_state_changed(self, running: bool) -> None:
         GLib.idle_add(self._on_scrcpy_state_idle, running)
 
     def _on_scrcpy_state_idle(self, running: bool) -> bool:
-        self._update_status_dots()
-        if not running and self._scrcpy_launch_pending:
+        if not running:
             self._scrcpy_launch_pending = False
+        self._update_status_dots()
         return False
 
     def _maybe_auto_launch_scrcpy(self) -> None:
         if not self._config.scrcpy.auto_launch_on_connect:
             return
+        if self._scrcpy_user_stopped:
+            return
         if self._scrcpy.is_running() or self._scrcpy_launch_pending:
+            return
+        if time.monotonic() < self._scrcpy_cooldown_until:
             return
         if not is_scrcpy_available(self._config.scrcpy.scrcpy_path):
             return
@@ -1208,6 +1253,7 @@ class AndroidTvApp(Adw.Application):
 
     def _on_window_destroy(self, *_args) -> None:
         self._window = None
+        self.quit()
 
     def _on_quit_requested(self, *_args) -> None:
         if self._window is not None and self._window._settings_dialog is not None:
@@ -1225,6 +1271,9 @@ class AndroidTvApp(Adw.Application):
             self._window = MainWindow(self, self._config)
             self._window.connect("destroy", self._on_window_destroy)
             self._window.present()
+        except Exception:
+            LOG.exception("Failed to open main window")
+            self.quit()
         finally:
             self._creating_window = False
 

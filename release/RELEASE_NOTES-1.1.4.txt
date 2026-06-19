@@ -1,0 +1,6 @@
+Fix scrcpy mirror flicker and immediate exit (v1.1.4).
+
+- Detect scrcpy 1.x vs 2.x and use compatible flags (--bit-rate vs --video-bit-rate; omit --no-audio on 1.x).
+- Mirror chip stays red until scrcpy survives startup; no green flash on instant failure.
+- Show error dialog with scrcpy output when mirror exits within 2 seconds.
+- Debounce relaunch: 15s cooldown after quick failure; respect manual stop vs auto-launch.

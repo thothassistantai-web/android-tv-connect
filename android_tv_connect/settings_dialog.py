@@ -18,21 +18,44 @@ from .adb_discovery import (
     discover_adb_devices,
 )
 from .adb_settings import (
-    normalize_adb_config,
     normalize_wired_serial,
     normalize_wireless_host,
     parse_wireless_port,
     wireless_host_is_auto,
 )
 from .branding import APP_NAME, VERSION
-from .config import AdbConfig, AppConfig, ScrcpyConfig
+from .config import AppConfig, ScrcpyConfig
+from .media_enumeration import (
+    AudioSourceOption,
+    VideoDeviceOption,
+    enumerate_audio_sources,
+    enumerate_v4l2_devices,
+)
+from .settings_presets import (
+    BIT_RATE_PRESETS,
+    FRAMERATE_PRESETS,
+    MAX_SIZE_PRESETS,
+    RESOLUTION_PRESETS,
+    WIRELESS_PORT_PRESETS,
+    bit_rate_index,
+    framerate_index,
+    max_size_index,
+    normalize_capture_config,
+    normalize_scrcpy_config,
+    resolution_index,
+    validate_adb_for_save,
+    wireless_port_preset_index,
+)
 from .settings_store import save_config
 from .shortcuts import SHORTCUT_DEFINITIONS, SHORTCUT_HELP, validate_shortcut
 from .update_ui import check_for_updates
 
 _AUTO_WIRED_LABEL = "Auto (first USB)"
 _AUTO_WIRELESS_LABEL = "Auto (first wireless)"
+_AUTO_VIDEO_LABEL = "Auto (discover dongle)"
+_AUTO_AUDIO_LABEL = "Auto (default source)"
 _MANUAL_LABEL = "Manual…"
+_CUSTOM_PORT_LABEL = "Custom…"
 _SEAMLESS_DOCS = "docs/SEAMLESS-UX.md"
 
 
@@ -75,6 +98,22 @@ class SettingsDialog(Adw.Window):
         toolbar.set_content(scrolled)
         self.set_content(toolbar)
         self.connect("close-request", self._on_close_request)
+        self._install_escape_close()
+
+    def _install_escape_close(self) -> None:
+        controller = Gtk.ShortcutController()
+        controller.set_scope(Gtk.ShortcutScope.LOCAL)
+        controller.add_shortcut(
+            Gtk.Shortcut.new(
+                Gtk.ShortcutTrigger.parse_string("Escape"),
+                Gtk.CallbackAction.new(self._on_escape_shortcut),
+            )
+        )
+        self.add_controller(controller)
+
+    def _on_escape_shortcut(self, *_args) -> bool:
+        self.close()
+        return True
 
     def _on_close_request(self, *_args) -> bool:
         return False
@@ -151,10 +190,20 @@ class SettingsDialog(Adw.Window):
         self._wireless_manual.set_visible(False)
         group.add(self._wireless_manual)
 
-        self._wireless_port = self._entry_row(
-            "Wireless port", "TCP port for network ADB", str(self._config.adb.wireless_port)
+        self._wireless_port_combo = Adw.ComboRow(title="Wireless port")
+        port_labels = [str(port) for port in WIRELESS_PORT_PRESETS] + [_CUSTOM_PORT_LABEL]
+        self._wireless_port_combo.set_model(Gtk.StringList.new(port_labels))
+        self._wireless_port_combo.connect(
+            "notify::selected", self._on_wireless_port_selection_changed
         )
-        group.add(self._wireless_port)
+        group.add(self._wireless_port_combo)
+
+        self._wireless_port_custom = self._spin_row(
+            "Custom wireless port", float(self._config.adb.wireless_port), 1, 1024, 65535
+        )
+        self._wireless_port_custom.set_digits(0)
+        self._wireless_port_custom.set_visible(False)
+        group.add(self._wireless_port_custom)
 
         refresh_row = Adw.ActionRow(title="Refresh devices")
         refresh_row.set_subtitle("Re-scan adb devices and the local network")
@@ -170,6 +219,7 @@ class SettingsDialog(Adw.Window):
         )
         group.add(self._prefer_wired)
 
+        self._select_wireless_port_from_config()
         self._refresh_adb_devices(initial=True)
         return group
 
@@ -187,35 +237,16 @@ class SettingsDialog(Adw.Window):
         )
         group.add(self._scrcpy_auto)
 
-        self._scrcpy_path = self._entry_row(
-            "scrcpy path",
-            "Leave empty to use scrcpy from PATH",
-            self._config.scrcpy.scrcpy_path,
-        )
-        group.add(self._scrcpy_path)
-
-        self._scrcpy_max_size = self._spin_row(
-            "Max size (px)",
-            float(self._config.scrcpy.max_size),
-            160,
-            0,
-            3840,
-        )
-        group.add(self._scrcpy_max_size)
-
-        self._scrcpy_bit_rate = self._entry_row(
-            "Video bit rate",
-            "scrcpy --video-bit-rate value, e.g. 8M or 2M",
-            self._config.scrcpy.bit_rate,
-        )
+        self._scrcpy_bit_rate = Adw.ComboRow(title="Video bit rate")
+        self._scrcpy_bit_rate.set_model(Gtk.StringList.new(list(BIT_RATE_PRESETS)))
+        self._scrcpy_bit_rate.set_selected(bit_rate_index(self._config.scrcpy.bit_rate))
         group.add(self._scrcpy_bit_rate)
 
-        self._scrcpy_title = self._entry_row(
-            "Window title",
-            "Title for the scrcpy window",
-            self._config.scrcpy.window_title,
-        )
-        group.add(self._scrcpy_title)
+        max_labels = [label for label, _value in MAX_SIZE_PRESETS]
+        self._scrcpy_max_size = Adw.ComboRow(title="Max size")
+        self._scrcpy_max_size.set_model(Gtk.StringList.new(max_labels))
+        self._scrcpy_max_size.set_selected(max_size_index(self._config.scrcpy.max_size))
+        group.add(self._scrcpy_max_size)
 
         self._scrcpy_fullscreen = self._switch_row(
             "Start fullscreen",
@@ -244,6 +275,23 @@ class SettingsDialog(Adw.Window):
             self._config.scrcpy.turn_screen_off,
         )
         group.add(self._scrcpy_turn_off)
+
+        advanced = Adw.ExpanderRow(title="Advanced scrcpy options")
+        advanced.set_subtitle("Custom binary path and window title")
+
+        self._scrcpy_path = self._entry_row(
+            "scrcpy path",
+            "Leave empty to use scrcpy from PATH",
+            self._config.scrcpy.scrcpy_path,
+        )
+        self._scrcpy_title = self._entry_row(
+            "Window title",
+            "Title for the scrcpy window",
+            self._config.scrcpy.window_title,
+        )
+        advanced.add_row(self._scrcpy_path)
+        advanced.add_row(self._scrcpy_title)
+        group.add(advanced)
 
         return group
 
@@ -297,12 +345,24 @@ class SettingsDialog(Adw.Window):
             if device.host == host and device.port == port:
                 self._wireless_combo.set_selected(index)
                 self._wireless_manual.set_visible(False)
-                self._wireless_port.set_text(str(device.port))
+                self._select_wireless_port(port)
                 return
 
         self._wireless_combo.set_selected(self._wireless_manual_index())
         self._wireless_manual.set_text(host)
         self._wireless_manual.set_visible(True)
+        self._select_wireless_port(port)
+
+    def _select_wireless_port(self, port: int) -> None:
+        index = wireless_port_preset_index(port)
+        self._wireless_port_combo.set_selected(index)
+        custom = index == len(WIRELESS_PORT_PRESETS)
+        self._wireless_port_custom.set_visible(custom)
+        if custom:
+            self._wireless_port_custom.set_value(float(port))
+
+    def _select_wireless_port_from_config(self) -> None:
+        self._select_wireless_port(self._config.adb.wireless_port)
 
     def _on_wired_selection_changed(self, *_args) -> None:
         manual = self._wired_combo.get_selected() == self._wired_manual_index()
@@ -315,16 +375,23 @@ class SettingsDialog(Adw.Window):
         if manual or selected <= 0:
             return
         device = self._wireless_devices[selected - 1]
-        self._wireless_port.set_text(str(device.port))
+        self._select_wireless_port(device.port)
+
+    def _on_wireless_port_selection_changed(self, *_args) -> None:
+        custom = self._wireless_port_combo.get_selected() == len(WIRELESS_PORT_PRESETS)
+        self._wireless_port_custom.set_visible(custom)
 
     def _current_wireless_port(self) -> int:
-        port, _err = parse_wireless_port(self._wireless_port.get_text())
-        return port or AdbConfig.wireless_port
+        selected = self._wireless_port_combo.get_selected()
+        if selected < len(WIRELESS_PORT_PRESETS):
+            return WIRELESS_PORT_PRESETS[selected]
+        return int(self._wireless_port_custom.get_value())
 
     def _refresh_adb_devices(self, *, initial: bool = False) -> None:
-        if not initial:
-            self._refresh_button.set_sensitive(False)
-            self._refresh_button.set_label("Scanning…")
+        self._refresh_button.set_sensitive(False)
+        self._refresh_button.set_label("Scanning…" if not initial else "Loading…")
+        self._wired_combo.set_sensitive(False)
+        self._wireless_combo.set_sensitive(False)
 
         port = self._current_wireless_port() if not initial else self._config.adb.wireless_port
 
@@ -337,14 +404,6 @@ class SettingsDialog(Adw.Window):
             except Exception:
                 wired, wireless = [], []
             GLib.idle_add(self._apply_discovered_devices, wired, wireless, initial)
-
-        if initial:
-            try:
-                wired, wireless = discover_adb_devices(scan_subnet=False, wireless_port=port)
-            except Exception:
-                wired, wireless = [], []
-            self._apply_discovered_devices(wired, wireless, True)
-            return
 
         threading.Thread(target=work, daemon=True, name="adb-device-scan").start()
 
@@ -360,9 +419,10 @@ class SettingsDialog(Adw.Window):
         self._set_combo_model(self._wireless_combo, self._wireless_combo_labels())
         self._select_wired_from_config()
         self._select_wireless_from_config()
-        if not initial:
-            self._refresh_button.set_sensitive(True)
-            self._refresh_button.set_label("Refresh")
+        self._wired_combo.set_sensitive(True)
+        self._wireless_combo.set_sensitive(True)
+        self._refresh_button.set_sensitive(True)
+        self._refresh_button.set_label("Refresh")
         return False
 
     def _on_refresh_devices(self, *_args) -> None:
@@ -391,25 +451,193 @@ class SettingsDialog(Adw.Window):
             f"card while remote control uses ADB. See {_SEAMLESS_DOCS} for the "
             "connection strategy."
         )
-        self._video_device = self._entry_row(
-            "Video device",
-            "Use auto or a V4L2 node such as /dev/video1",
+
+        self._video_devices: list[VideoDeviceOption] = []
+        self._audio_sources: list[AudioSourceOption] = []
+
+        self._video_combo = Adw.ComboRow(title="Video device")
+        self._video_combo.connect("notify::selected", self._on_video_selection_changed)
+        group.add(self._video_combo)
+
+        self._video_manual = self._entry_row(
+            "Video device (manual)",
+            "V4L2 node such as /dev/video1",
             self._config.capture.video_device,
         )
-        self._audio_device = self._entry_row(
-            "Audio device",
-            "PipeWire source name for capture audio",
+        self._video_manual.set_visible(False)
+        group.add(self._video_manual)
+
+        resolution_labels = [label for label, _w, _h in RESOLUTION_PRESETS]
+        self._resolution_combo = Adw.ComboRow(title="Resolution")
+        self._resolution_combo.set_model(Gtk.StringList.new(resolution_labels))
+        self._resolution_combo.set_selected(
+            resolution_index(self._config.capture.width, self._config.capture.height)
+        )
+        group.add(self._resolution_combo)
+
+        self._fps_combo = Adw.ComboRow(title="Framerate")
+        self._fps_combo.set_model(
+            Gtk.StringList.new([f"{value} fps" for value in FRAMERATE_PRESETS])
+        )
+        self._fps_combo.set_selected(framerate_index(self._config.capture.framerate))
+        group.add(self._fps_combo)
+
+        self._audio_combo = Adw.ComboRow(title="Audio device")
+        self._audio_combo.connect("notify::selected", self._on_audio_selection_changed)
+        group.add(self._audio_combo)
+
+        self._audio_manual = self._entry_row(
+            "Audio device (manual)",
+            "PipeWire or PulseAudio source name",
             self._config.capture.audio_device,
         )
-        self._width = self._spin_row("Width", self._config.capture.width, 1, 640, 3840)
-        self._height = self._spin_row("Height", self._config.capture.height, 1, 480, 2160)
-        self._fps = self._spin_row("Framerate", self._config.capture.framerate, 1, 15, 60)
-        group.add(self._video_device)
-        group.add(self._audio_device)
-        group.add(self._width)
-        group.add(self._height)
-        group.add(self._fps)
+        self._audio_manual.set_visible(False)
+        group.add(self._audio_manual)
+
+        refresh_row = Adw.ActionRow(title="Refresh capture devices")
+        refresh_row.set_subtitle("Re-scan V4L2 nodes and audio sources")
+        self._capture_refresh_button = Gtk.Button(label="Refresh")
+        self._capture_refresh_button.connect("clicked", self._on_refresh_capture_devices)
+        refresh_row.add_suffix(self._capture_refresh_button)
+        group.add(refresh_row)
+
+        self._refresh_capture_devices(initial=True)
         return group
+
+    def _video_combo_labels(self) -> list[str]:
+        labels = [_AUTO_VIDEO_LABEL]
+        labels.extend(device.description for device in self._video_devices)
+        labels.append(_MANUAL_LABEL)
+        return labels
+
+    def _audio_combo_labels(self) -> list[str]:
+        labels = [_AUTO_AUDIO_LABEL]
+        labels.extend(
+            f"{source.description} ({source.name})" for source in self._audio_sources
+        )
+        labels.append(_MANUAL_LABEL)
+        return labels
+
+    def _video_manual_index(self) -> int:
+        return len(self._video_devices) + 1
+
+    def _audio_manual_index(self) -> int:
+        return len(self._audio_sources) + 1
+
+    def _select_video_from_config(self) -> None:
+        configured = (self._config.capture.video_device or "").strip()
+        if not configured or configured.lower() == "auto":
+            self._video_combo.set_selected(0)
+            self._video_manual.set_visible(False)
+            return
+        for index, device in enumerate(self._video_devices, start=1):
+            if device.node == configured:
+                self._video_combo.set_selected(index)
+                self._video_manual.set_visible(False)
+                return
+        self._video_combo.set_selected(self._video_manual_index())
+        self._video_manual.set_text(configured)
+        self._video_manual.set_visible(True)
+
+    def _select_audio_from_config(self) -> None:
+        configured = (self._config.capture.audio_device or "").strip()
+        if not configured or configured.lower() == "auto":
+            self._audio_combo.set_selected(0)
+            self._audio_manual.set_visible(False)
+            return
+        for index, source in enumerate(self._audio_sources, start=1):
+            if source.name == configured:
+                self._audio_combo.set_selected(index)
+                self._audio_manual.set_visible(False)
+                return
+        self._audio_combo.set_selected(self._audio_manual_index())
+        self._audio_manual.set_text(configured)
+        self._audio_manual.set_visible(True)
+
+    def _on_video_selection_changed(self, *_args) -> None:
+        manual = self._video_combo.get_selected() == self._video_manual_index()
+        self._video_manual.set_visible(manual)
+
+    def _on_audio_selection_changed(self, *_args) -> None:
+        manual = self._audio_combo.get_selected() == self._audio_manual_index()
+        self._audio_manual.set_visible(manual)
+
+    def _refresh_capture_devices(self, *, initial: bool = False) -> None:
+        self._capture_refresh_button.set_sensitive(False)
+        self._capture_refresh_button.set_label("Scanning…" if not initial else "Loading…")
+        self._video_combo.set_sensitive(False)
+        self._audio_combo.set_sensitive(False)
+
+        def work() -> None:
+            try:
+                video = enumerate_v4l2_devices()
+                audio = enumerate_audio_sources()
+            except Exception:
+                video, audio = [], []
+            GLib.idle_add(self._apply_capture_devices, video, audio)
+
+        threading.Thread(target=work, daemon=True, name="capture-device-scan").start()
+
+    def _apply_capture_devices(
+        self,
+        video: list[VideoDeviceOption],
+        audio: list[AudioSourceOption],
+    ) -> bool:
+        self._video_devices = video
+        self._audio_sources = audio
+        self._set_combo_model(self._video_combo, self._video_combo_labels())
+        self._set_combo_model(self._audio_combo, self._audio_combo_labels())
+        self._select_video_from_config()
+        self._select_audio_from_config()
+        self._video_combo.set_sensitive(True)
+        self._audio_combo.set_sensitive(True)
+        self._capture_refresh_button.set_sensitive(True)
+        self._capture_refresh_button.set_label("Refresh")
+        return False
+
+    def _on_refresh_capture_devices(self, *_args) -> None:
+        self._refresh_capture_devices(initial=False)
+
+    def _video_device_value(self) -> str:
+        selected = self._video_combo.get_selected()
+        if selected <= 0:
+            return "auto"
+        if selected == self._video_manual_index():
+            return self._video_manual.get_text().strip()
+        return self._video_devices[selected - 1].node
+
+    def _audio_device_value(self) -> str:
+        selected = self._audio_combo.get_selected()
+        if selected <= 0:
+            return "auto"
+        if selected == self._audio_manual_index():
+            return self._audio_manual.get_text().strip()
+        return self._audio_sources[selected - 1].name
+
+    def _resolution_value(self) -> tuple[int, int]:
+        index = self._resolution_combo.get_selected()
+        if index < 0 or index >= len(RESOLUTION_PRESETS):
+            return RESOLUTION_PRESETS[0][1], RESOLUTION_PRESETS[0][2]
+        _label, width, height = RESOLUTION_PRESETS[index]
+        return width, height
+
+    def _framerate_value(self) -> int:
+        index = self._fps_combo.get_selected()
+        if index < 0 or index >= len(FRAMERATE_PRESETS):
+            return FRAMERATE_PRESETS[0]
+        return FRAMERATE_PRESETS[index]
+
+    def _scrcpy_bit_rate_value(self) -> str:
+        index = self._scrcpy_bit_rate.get_selected()
+        if index < 0 or index >= len(BIT_RATE_PRESETS):
+            return ScrcpyConfig.bit_rate
+        return BIT_RATE_PRESETS[index]
+
+    def _scrcpy_max_size_value(self) -> int:
+        index = self._scrcpy_max_size.get_selected()
+        if index < 0 or index >= len(MAX_SIZE_PRESETS):
+            return ScrcpyConfig.max_size
+        return MAX_SIZE_PRESETS[index][1]
 
     def _input_group(self) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup(title="Input and Control")
@@ -663,9 +891,10 @@ class SettingsDialog(Adw.Window):
         shortcuts = replace(self._config.shortcuts, **shortcuts_kwargs)
 
         wireless_host_raw = self._wireless_host_value()
-        port, port_err = parse_wireless_port(self._wireless_port.get_text())
-        if port_err:
-            self._show_error("Invalid wireless port", port_err)
+        port = self._current_wireless_port()
+        port, port_err = parse_wireless_port(str(port))
+        if port_err or port is None:
+            self._show_error("Invalid wireless port", port_err or "Invalid wireless port")
             return
 
         adb = replace(
@@ -674,26 +903,35 @@ class SettingsDialog(Adw.Window):
             wireless_host=normalize_wireless_host(wireless_host_raw),
             wireless_port=port,
         )
-        adb = normalize_adb_config(adb)
-        capture = replace(
-            self._config.capture,
-            video_device=self._video_device.get_text().strip(),
-            audio_device=self._audio_device.get_text().strip(),
-            width=int(self._width.get_value()),
-            height=int(self._height.get_value()),
-            framerate=int(self._fps.get_value()),
+        adb, adb_err = validate_adb_for_save(adb)
+        if adb_err or adb is None:
+            self._show_error("Invalid ADB settings", adb_err or "Invalid ADB settings")
+            return
+
+        width, height = self._resolution_value()
+        capture = normalize_capture_config(
+            replace(
+                self._config.capture,
+                video_device=self._video_device_value(),
+                audio_device=self._audio_device_value(),
+                width=width,
+                height=height,
+                framerate=self._framerate_value(),
+            )
         )
-        scrcpy = replace(
-            self._config.scrcpy,
-            auto_launch_on_connect=self._scrcpy_auto.get_active(),
-            scrcpy_path=self._scrcpy_path.get_text().strip(),
-            max_size=int(self._scrcpy_max_size.get_value()),
-            bit_rate=self._scrcpy_bit_rate.get_text().strip() or ScrcpyConfig.bit_rate,
-            fullscreen=self._scrcpy_fullscreen.get_active(),
-            no_audio=self._scrcpy_no_audio.get_active(),
-            stay_awake=self._scrcpy_stay_awake.get_active(),
-            turn_screen_off=self._scrcpy_turn_off.get_active(),
-            window_title=self._scrcpy_title.get_text().strip() or ScrcpyConfig.window_title,
+        scrcpy = normalize_scrcpy_config(
+            replace(
+                self._config.scrcpy,
+                auto_launch_on_connect=self._scrcpy_auto.get_active(),
+                scrcpy_path=self._scrcpy_path.get_text().strip(),
+                max_size=self._scrcpy_max_size_value(),
+                bit_rate=self._scrcpy_bit_rate_value(),
+                fullscreen=self._scrcpy_fullscreen.get_active(),
+                no_audio=self._scrcpy_no_audio.get_active(),
+                stay_awake=self._scrcpy_stay_awake.get_active(),
+                turn_screen_off=self._scrcpy_turn_off.get_active(),
+                window_title=self._scrcpy_title.get_text().strip() or ScrcpyConfig.window_title,
+            )
         )
         input_cfg = replace(
             self._config.input,
@@ -737,5 +975,12 @@ class SettingsDialog(Adw.Window):
             watch_poll_interval_s=self._watch_poll.get_value(),
         )
         save_config(updated)
-        self._on_saved(updated)
+        self._config = updated
+        callback = self._on_saved
         self.close()
+        GLib.idle_add(self._deliver_saved_config, callback, updated)
+
+    @staticmethod
+    def _deliver_saved_config(callback, config: AppConfig) -> bool:
+        callback(config)
+        return False

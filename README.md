@@ -1,6 +1,6 @@
 # Android TV Connect
 
-**Version 1.1.1** — Stream an Android TV stick through a MacroSilicon MS2109 HDMI capture dongle and control it with ADB from a GTK4 desktop app.
+**Version 1.1.5** — Stream an Android TV stick through a MacroSilicon MS2109 HDMI capture dongle and control it with ADB from a GTK4 desktop app.
 
 **Repository:** https://github.com/thothassistantai-web/android-tv-connect
 
@@ -139,6 +139,8 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 Upload `release/android-tv-connect-<version>.tar.gz` and `release/update-manifest.json` to a GitHub release.
 
 ## Configuration
+
+Open **Settings** (`Shift+F6`) to pick ADB devices, capture card, resolution, and scrcpy options from preset dropdowns. Device lists refresh in the background; saving never blocks the UI. Manual fields are under *Manual…* or *Advanced* when needed.
 
 Settings file:
 

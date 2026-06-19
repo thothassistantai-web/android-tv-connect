@@ -1,0 +1,7 @@
+Fix Settings dialog freeze and replace risky free-text fields with presets (v1.1.5).
+
+- Move ADB discovery, capture enumeration, and settings apply off the GTK main thread.
+- Close Settings immediately on save; ADB reconnect runs in the background.
+- Preset dropdowns for resolution, framerate, scrcpy bit rate/max size, wireless port, V4L2 video, and audio sources.
+- Manual/advanced options remain available but collapsed or last-resort only.
+- Escape closes the Settings dialog without trapping focus.

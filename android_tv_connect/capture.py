@@ -96,9 +96,12 @@ class CapturePipeline:
     def _video_pipeline_desc(self) -> str:
         cfg = self.config
         device = self._effective_video_device or cfg.video_device
+        size_caps = ""
+        if cfg.width > 0 and cfg.height > 0:
+            size_caps = f"width={cfg.width},height={cfg.height},"
         return (
             f"v4l2src name=src device={device} io-mode=2 ! "
-            f"image/jpeg,width={cfg.width},height={cfg.height},"
+            f"image/jpeg,{size_caps}"
             f"framerate={cfg.framerate}/1 ! "
             f"jpegdec ! videoconvert ! video/x-raw,format=RGB ! "
             f"appsink name=video_sink emit-signals=true max-buffers=1 "
@@ -107,8 +110,12 @@ class CapturePipeline:
 
     def _audio_pipeline_desc(self) -> str:
         cfg = self.config
+        device = (cfg.audio_device or "").strip()
+        device_prop = ""
+        if device and device.lower() != "auto":
+            device_prop = f" device={device}"
         return (
-            f"pulsesrc name=audiosrc device={cfg.audio_device} ! "
+            f"pulsesrc name=audiosrc{device_prop} ! "
             f"audioconvert ! audioresample ! "
             f"autoaudiosink sync=false"
         )

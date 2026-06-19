@@ -753,13 +753,6 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_settings_saved(self, config: AppConfig) -> None:
         self._config = config
-        save_config(config)
-        self._adb.update_settings(
-            wired_serial=config.adb.wired_serial,
-            wireless_host=config.adb.wireless_host,
-            wireless_port=config.adb.wireless_port,
-            prefer_wired=config.input.prefer_wired_adb,
-        )
         self._chrome.set_enabled(config.window.chrome_auto_hide)
         self._chrome.set_delay_ms(config.window.chrome_hide_delay_ms)
         if config.window.control_bar_collapsed:
@@ -771,6 +764,23 @@ class MainWindow(Adw.ApplicationWindow):
         self._update_shortcut_tooltips()
         self._install_shortcuts()
         self._video.update_input_mode(self._input_mode)
+
+        def apply_adb() -> None:
+            try:
+                self._adb.update_settings(
+                    wired_serial=config.adb.wired_serial,
+                    wireless_host=config.adb.wireless_host,
+                    wireless_port=config.adb.wireless_port,
+                    prefer_wired=config.input.prefer_wired_adb,
+                )
+            except Exception:
+                LOG.exception("Failed to apply ADB settings")
+
+        threading.Thread(
+            target=apply_adb,
+            daemon=True,
+            name="adb-settings-apply",
+        ).start()
 
     def toggle_keyboard_capture(self) -> None:
         if self._input_mode == InputMode.KEYBOARD:

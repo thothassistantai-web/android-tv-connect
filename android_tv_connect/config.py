@@ -79,6 +79,14 @@ class WindowConfig:
 
 
 @dataclass(frozen=True)
+class UpdateConfig:
+    auto_check_on_launch: bool = True
+    manifest_url_override: str = ""
+    dismissed_version_code: int = 0
+    last_release_notes: str = ""
+
+
+@dataclass(frozen=True)
 class InputConfig:
     soft_buttons_work_unfocused: bool = True
     keyboard_requires_focus: bool = True
@@ -98,6 +106,7 @@ class AppConfig:
     window: WindowConfig = field(default_factory=WindowConfig)
     input: InputConfig = field(default_factory=InputConfig)
     shortcuts: ShortcutsConfig = field(default_factory=ShortcutsConfig)
+    updates: UpdateConfig = field(default_factory=UpdateConfig)
     watch_poll_interval_s: float = 2.0
     watch_disconnect_debounce_s: float = 3.0
     watch_autostart_enabled: bool = True

@@ -1,0 +1,8 @@
+{
+  "version": "1.1.0",
+  "versionCode": 2,
+  "bundleUrl": "https://github.com/thothassistantai-web/android-tv-connect/releases/download/v1.1.0/android-tv-connect-1.1.0.tar.gz",
+  "sha256": "replace-with-sha256-from-build-release.sh",
+  "mandatory": false,
+  "releaseNotes": "Example manifest — run scripts/build-release.sh before publishing."
+}

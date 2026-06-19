@@ -6,7 +6,7 @@ Wants=pipewire.service
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/android-tv-connect --watch
+ExecStart=%h/.local/bin/atv-connect --watch
 Restart=on-failure
 RestartSec=5
 

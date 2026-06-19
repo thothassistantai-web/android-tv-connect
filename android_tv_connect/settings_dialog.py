@@ -28,6 +28,7 @@ from .branding import APP_NAME, VERSION
 from .config import AdbConfig, AppConfig
 from .settings_store import save_config
 from .shortcuts import SHORTCUT_DEFINITIONS, SHORTCUT_HELP, validate_shortcut
+from .update_ui import check_for_updates
 
 _AUTO_LABEL = "Auto (first available)"
 _MANUAL_LABEL = "Manual…"
@@ -61,6 +62,7 @@ class SettingsDialog(Adw.Window):
         page.add(self._input_group())
         page.add(self._shortcuts_group())
         page.add(self._window_group())
+        page.add(self._updates_group())
         page.add(self._about_group())
         page.add(self._watch_group())
 
@@ -76,6 +78,15 @@ class SettingsDialog(Adw.Window):
 
     def _on_cancel(self, *_args) -> None:
         self.close()
+
+    def _show_info(self, heading: str, body: str) -> None:
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading=heading,
+            body=body,
+        )
+        dialog.add_response("ok", "OK")
+        dialog.present()
 
     def _show_error(self, heading: str, body: str) -> None:
         dialog = Adw.MessageDialog(
@@ -418,6 +429,121 @@ class SettingsDialog(Adw.Window):
         group.add(self._pip_opacity)
         return group
 
+    def _updates_group(self) -> Adw.PreferencesGroup:
+        group = Adw.PreferencesGroup(title="Updates")
+        group.set_description(
+            "The launcher checks GitHub releases before starting the app. "
+            "If the main app breaks, run atv-connect to recover."
+        )
+
+        self._auto_check_updates = self._switch_row(
+            "Check on launch",
+            "Let the launcher look for updates when you start the app",
+            self._config.updates.auto_check_on_launch,
+        )
+        group.add(self._auto_check_updates)
+
+        self._manifest_override = self._entry_row(
+            "Manifest URL override",
+            "Leave empty to use the default GitHub releases endpoint",
+            self._config.updates.manifest_url_override,
+        )
+        group.add(self._manifest_override)
+
+        notes_text = self._config.updates.last_release_notes.strip()
+        self._release_notes_row = Adw.ActionRow(
+            title="Latest release notes",
+            subtitle=notes_text or "Run “Check for updates now” to fetch notes",
+        )
+        self._release_notes_row.set_activatable(False)
+        group.add(self._release_notes_row)
+
+        check_row = Adw.ActionRow(title="Check for updates now")
+        check_row.set_subtitle("Uses the isolated launcher updater")
+        self._check_updates_button = Gtk.Button(label="Check")
+        self._check_updates_button.connect("clicked", self._on_check_updates)
+        check_row.add_suffix(self._check_updates_button)
+        group.add(check_row)
+
+        return group
+
+    def _on_check_updates(self, *_args) -> None:
+        self._check_updates_button.set_sensitive(False)
+        self._check_updates_button.set_label("Checking…")
+
+        def work() -> None:
+            result = check_for_updates(apply=False)
+            GLib.idle_add(self._show_update_result, result)
+
+        threading.Thread(target=work, daemon=True, name="update-check").start()
+
+    def _show_update_result(self, result) -> bool:
+        self._check_updates_button.set_sensitive(True)
+        self._check_updates_button.set_label("Check")
+
+        if not result.ok and result.error:
+            self._show_error("Update check failed", result.error)
+            return False
+
+        if result.release_notes:
+            self._release_notes_row.set_subtitle(result.release_notes[:500])
+
+        if result.update_available:
+            version = result.manifest_version or "unknown"
+            body = (
+                f"Version {version} is available "
+                f"(installed {result.installed_version}).\n\n"
+                f"{result.release_notes or 'Restart the app to install via the launcher.'}"
+            )
+            dialog = Adw.MessageDialog(
+                transient_for=self,
+                heading="Update available",
+                body=body,
+            )
+            dialog.add_response("later", "Later")
+            dialog.add_response("install", "Install and restart")
+            dialog.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
+
+            def on_response(_dialog, response: str) -> None:
+                if response != "install":
+                    return
+                self._check_updates_button.set_sensitive(False)
+                self._check_updates_button.set_label("Installing…")
+
+                def install_work() -> None:
+                    install_result = check_for_updates(apply=True)
+                    GLib.idle_add(self._finish_install, install_result)
+
+                threading.Thread(
+                    target=install_work,
+                    daemon=True,
+                    name="update-install",
+                ).start()
+
+            dialog.connect("response", on_response)
+            dialog.present()
+            return False
+
+        self._show_info(
+            "Up to date",
+            f"You are running {result.installed_version} (versionCode {result.installed_version_code}).",
+        )
+        return False
+
+    def _finish_install(self, result) -> bool:
+        self._check_updates_button.set_sensitive(True)
+        self._check_updates_button.set_label("Check")
+        if result.error:
+            self._show_error("Install failed", result.error)
+            return False
+        if result.release_notes:
+            self._release_notes_row.set_subtitle(result.release_notes[:500])
+        self._show_info(
+            "Update installed",
+            "Quit and launch atv-connect again to run the new version.",
+        )
+        return False
+
     def _about_group(self) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup(title="About")
         row = Adw.ActionRow(title=APP_NAME, subtitle=f"Version {VERSION}")
@@ -505,6 +631,12 @@ class SettingsDialog(Adw.Window):
             input=input_cfg,
             shortcuts=shortcuts,
             window=window,
+            updates=replace(
+                self._config.updates,
+                auto_check_on_launch=self._auto_check_updates.get_active(),
+                manifest_url_override=self._manifest_override.get_text().strip(),
+                last_release_notes=self._release_notes_row.get_subtitle() or "",
+            ),
             watch_autostart_enabled=self._watch_enable.get_active(),
             watch_poll_interval_s=self._watch_poll.get_value(),
         )

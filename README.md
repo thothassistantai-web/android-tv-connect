@@ -1,13 +1,23 @@
 # Android TV Connect
 
-**Version 1.0.0** — Stream an Android TV stick through a MacroSilicon MS2109 HDMI capture dongle and control it with ADB from a GTK4 desktop app.
+**Version 1.1.0** — Stream an Android TV stick through a MacroSilicon MS2109 HDMI capture dongle and control it with ADB from a GTK4 desktop app.
 
 **Repository:** https://github.com/thothassistantai-web/android-tv-connect
 
-Check the installed version:
+## Quick start
 
 ```bash
-android-tv-connect --version
+chmod +x install.sh
+./install.sh
+atv-connect
+```
+
+The **launcher** (`android_tv_connect_launcher`) checks GitHub for updates, installs versioned app bundles, then starts the main app. If the GTK app breaks, `atv-connect` still runs to ship fixes. See [docs/UPDATES.md](docs/UPDATES.md).
+
+Check versions:
+
+```bash
+atv-connect --version
 ```
 
 ## Requirements
@@ -30,23 +40,20 @@ Hardware:
 
 ## Install
 
-From the project directory:
-
 ```bash
-chmod +x install.sh
-./install.sh
+./scripts/install-local.sh
 ```
 
-This installs to `~/.local`:
+Or `./install.sh` (same installer).
 
 | Path | Purpose |
 |------|---------|
-| `~/.local/share/android-tv-connect/` | Application package |
-| `~/.local/bin/android-tv-connect` | Launcher script |
+| `~/.local/share/android-tv-connect/launcher/` | Stable updater (rarely changes) |
+| `~/.local/share/android-tv-connect/versions/<ver>/` | Versioned app bundles |
+| `~/.local/share/android-tv-connect/current` | Symlink to active version |
+| `~/.local/bin/atv-connect` | User entry command |
 | `~/.local/share/applications/android-tv-connect.desktop` | App menu entry |
 | `~/.config/systemd/user/android-tv-connect-watch.service` | Auto-launch watcher |
-
-The install script also attempts to install udev rules so the capture device is accessible without root. If sudo is unavailable, it prints manual commands.
 
 ### udev rules (manual)
 
@@ -64,18 +71,16 @@ Unplug and replug the capture dongle after installing rules.
 ### Manual launch
 
 ```bash
-android-tv-connect
+atv-connect
 ```
 
 Equivalent:
 
 ```bash
-PYTHONPATH=~/.local/share/android-tv-connect python3 -m android_tv_connect
+python3 -m android_tv_connect_launcher
 ```
 
 ### Watch mode (auto-launch)
-
-The install script enables a systemd user service that polls for the capture dongle and an ADB device, then opens the main window when both are present.
 
 ```bash
 systemctl --user status android-tv-connect-watch
@@ -83,35 +88,51 @@ systemctl --user restart android-tv-connect-watch
 journalctl --user -u android-tv-connect-watch -f
 ```
 
-Watch behavior:
+The watcher runs `atv-connect --watch`, which checks for updates then starts the device poller.
 
-1. Poll every 2 seconds for capture USB (`534d:2109`) and `/dev/video0`
-2. Poll for an ADB device (wired serial preferred, wireless fallback)
-3. Launch the main window when both are present and the app is not already running
-4. Debounce disconnects for 3 seconds before closing
+### Updates
 
-### App menu
-
-After install, search for **Android TV Connect** in your desktop environment's application launcher.
+- **Automatic:** Settings → Updates → *Check on launch* (default on)
+- **Manual:** Settings → *Check for updates now*
+- **Recovery:** `atv-connect --apply-updates`
 
 ## Development
 
-Run from a source checkout without installing:
+Run from a source checkout:
+
+```bash
+PYTHONPATH=. python3 -m android_tv_connect_launcher
+```
+
+Main app only (no update check):
 
 ```bash
 PYTHONPATH=. python3 -m android_tv_connect
 ```
 
-Optional arguments (when implemented):
+### Tests
 
 ```bash
-android-tv-connect --watch          # background device watcher
-android-tv-connect --fullscreen     # start in fullscreen
+python3 -m unittest discover -s tests -p 'test_*.py'
 ```
+
+### Release build
+
+```bash
+./scripts/build-release.sh
+```
+
+Upload `release/android-tv-connect-<version>.tar.gz` and `release/update-manifest.json` to a GitHub release.
 
 ## Configuration
 
-Window geometry and mode are stored in:
+Settings file:
+
+```
+~/.config/android-tv-connect/config.json
+```
+
+Window geometry:
 
 ```
 ~/.config/android-tv-connect/window.toml
@@ -124,7 +145,7 @@ systemctl --user disable --now android-tv-connect-watch.service
 rm -f ~/.config/systemd/user/android-tv-connect-watch.service
 systemctl --user daemon-reload
 
-rm -f ~/.local/bin/android-tv-connect
+rm -f ~/.local/bin/atv-connect
 rm -f ~/.local/share/applications/android-tv-connect.desktop
 rm -rf ~/.local/share/android-tv-connect
 
@@ -142,8 +163,6 @@ lsusb | grep -i 534d:2109
 v4l2-ctl --list-devices
 ```
 
-Confirm udev rules are installed and the dongle was replugged.
-
 **ADB not detected**
 
 ```bash
@@ -151,21 +170,15 @@ adb devices -l
 adb kill-server && adb start-server
 ```
 
-Enable USB debugging on the Android TV stick and accept the authorization prompt.
-
-**Watcher not starting at login**
+**Updates not applying**
 
 ```bash
-systemctl --user enable android-tv-connect-watch.service
-loginctl show-user "$USER" -p Linger
+atv-connect --check-updates --json --force-check
+atv-connect --apply-updates
 ```
 
-Enable lingering if you need the user service before the first graphical login:
-
-```bash
-sudo loginctl enable-linger "$USER"
-```
+See [docs/UPDATES.md](docs/UPDATES.md) for architecture and manifest format.
 
 ## Support
 
-[GitHub Issues](https://github.com/thothassistantai-web/android-tv-connect/issues) — no email support.
+[GitHub Issues](https://github.com/thothassistantai-web/android-tv-connect/issues)

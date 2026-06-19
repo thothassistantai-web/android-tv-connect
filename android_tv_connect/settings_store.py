@@ -126,6 +126,7 @@ def load_config() -> AppConfig:
         watch_autostart_enabled=bool(
             raw.get("watch_autostart_enabled", defaults.watch_autostart_enabled)
         ),
+        updates=_merge_dataclass(type(defaults.updates), raw.get("updates")),
     )
 
 
@@ -152,6 +153,7 @@ def save_config(config: AppConfig) -> None:
         "watch_poll_interval_s": config.watch_poll_interval_s,
         "watch_disconnect_debounce_s": config.watch_disconnect_debounce_s,
         "watch_autostart_enabled": config.watch_autostart_enabled,
+        "updates": asdict(config.updates),
     }
     SETTINGS_PATH.write_text(json.dumps(payload, indent=2) + "\n")
 

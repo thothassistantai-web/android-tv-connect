@@ -1,0 +1,1 @@
+Isolated launcher updater: versioned app bundles from GitHub Releases with SHA256 verification.

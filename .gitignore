@@ -8,4 +8,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+release/*.tar.gz
+release/update-manifest.json
+release/staging-*/
 .DS_Store

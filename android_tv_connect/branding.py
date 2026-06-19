@@ -8,7 +8,7 @@ APP_ID = "com.androidtvconnect.App"
 APP_NAME = "Android TV Connect"
 APP_TAGLINE = "HDMI capture and ADB remote for Android TV sticks"
 COPYRIGHT = "© 2026 Android TV Connect contributors"
-WEBSITE = "https://github.com/android-tv-connect/android-tv-connect"
+WEBSITE = "https://github.com/thothassistantai-web/android-tv-connect"
 ISSUE_TRACKER = WEBSITE + "/issues"
 ICON_NAME = "android-tv-connect"
 

@@ -64,6 +64,8 @@ from .settings_store import load_config, save_config
 
 LOG = logging.getLogger(__name__)
 
+_LIVE_CAPTURE_DEBOUNCE_MS = 300
+
 MODE_NORMAL = "normal"
 MODE_PIP = "pip"
 MODE_FULLSCREEN = "fullscreen"
@@ -414,6 +416,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._mouse_mode = config.input.default_pointer_mode == "mouse"
         self._input_mode = InputMode.LOCAL
         self._settings_dialog: SettingsDialog | None = None
+        self._live_capture_timer: int | None = None
+        self._live_capture_pending = None
         self._scrcpy = ScrcpySession(
             on_state_change=self._on_scrcpy_state_changed,
             on_quick_exit=self._on_scrcpy_quick_exit,
@@ -703,7 +707,9 @@ class MainWindow(Adw.ApplicationWindow):
             if self._settings_dialog is not None:
                 self._settings_dialog.present()
                 return
-            self._settings_dialog = SettingsDialog(self, self._config, self._on_settings_saved)
+            self._settings_dialog = SettingsDialog(
+                self, self._config, self, self._on_settings_saved
+            )
             self._settings_dialog.connect("destroy", self._on_settings_closed)
             self._settings_dialog.present()
         except Exception:
@@ -751,19 +757,36 @@ class MainWindow(Adw.ApplicationWindow):
         if self._mode in (MODE_NORMAL, MODE_FULLSCREEN):
             self._chrome.bump()
 
-    def _on_settings_saved(self, config: AppConfig) -> None:
+    def apply_settings_live(self, config: AppConfig) -> None:
+        """Apply settings to the running app without writing config.json."""
+        prev_capture = self._config.capture
         self._config = config
+
         self._chrome.set_enabled(config.window.chrome_auto_hide)
         self._chrome.set_delay_ms(config.window.chrome_hide_delay_ms)
         if config.window.control_bar_collapsed:
             self._control_shell.collapse_user()
         else:
             self._control_shell.expand_user()
-        if self._capture.is_running():
-            self._capture.with_config(config.capture)
+
+        self._mouse_mode = config.input.default_pointer_mode == "mouse"
+        self._control_shell.set_mouse_mode(self._mouse_mode)
+
+        if self._mode == MODE_PIP:
+            self._state["pip_opacity"] = config.window.pip.opacity
+            self.set_opacity(config.window.pip.opacity)
+
         self._update_shortcut_tooltips()
         self._install_shortcuts()
         self._video.update_input_mode(self._input_mode)
+
+        if self._capture.is_running():
+            if prev_capture != config.capture:
+                self._schedule_live_capture_apply(config.capture)
+            else:
+                self._capture.with_config(config.capture)
+        else:
+            self._capture.config = config.capture
 
         def apply_adb() -> None:
             try:
@@ -781,6 +804,26 @@ class MainWindow(Adw.ApplicationWindow):
             daemon=True,
             name="adb-settings-apply",
         ).start()
+
+    def _schedule_live_capture_apply(self, capture_cfg) -> None:
+        self._live_capture_pending = capture_cfg
+        if self._live_capture_timer is not None:
+            return
+        self._live_capture_timer = GLib.timeout_add(
+            _LIVE_CAPTURE_DEBOUNCE_MS,
+            self._flush_live_capture_apply,
+        )
+
+    def _flush_live_capture_apply(self) -> bool:
+        self._live_capture_timer = None
+        pending = self._live_capture_pending
+        self._live_capture_pending = None
+        if pending is not None and self._capture.is_running():
+            self._capture.with_config(pending)
+        return False
+
+    def _on_settings_saved(self, config: AppConfig) -> None:
+        self.apply_settings_live(config)
 
     def toggle_keyboard_capture(self) -> None:
         if self._input_mode == InputMode.KEYBOARD:

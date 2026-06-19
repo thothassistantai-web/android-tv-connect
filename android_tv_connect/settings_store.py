@@ -163,6 +163,6 @@ def save_config(config: AppConfig) -> None:
 
 
 def config_snapshot(config: AppConfig) -> AppConfig:
-    from dataclasses import replace
+    from .settings_draft import config_snapshot as _snapshot
 
-    return replace(config)
+    return _snapshot(config)

@@ -482,9 +482,26 @@ class CapturePipeline:
     def effective_video_device(self) -> str | None:
         return self._effective_video_device
 
+    @staticmethod
+    def _stream_params(config: CaptureConfig) -> tuple:
+        return (
+            config.video_device,
+            config.audio_device,
+            config.width,
+            config.height,
+            config.framerate,
+        )
+
     def with_config(self, config: CaptureConfig) -> None:
-        """Hot-swap capture settings (used after settings save)."""
+        """Hot-swap capture settings; restart pipelines when stream params change."""
+        params_changed = self._stream_params(self.config) != self._stream_params(config)
         self.config = config
-        if self._running and self._state != "playing":
-            self._reconnect_backoff_ms = self.config.reconnect_interval_ms
+        if not self._running:
+            return
+        self._reconnect_backoff_ms = self.config.reconnect_interval_ms
+        if params_changed and self._state == "playing":
+            self._teardown_pipelines()
+            self._set_state("reconnecting")
+            self._schedule_reconnect(immediate=True)
+        elif self._state != "playing":
             self._schedule_reconnect(immediate=True)

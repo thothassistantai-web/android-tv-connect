@@ -1,0 +1,7 @@
+Live settings preview with save-only persistence (v1.1.6).
+
+- Settings apply immediately to the running app as you change controls (300ms debounce for capture restart).
+- Save writes config.json; Cancel or Escape reverts live changes to the snapshot from when the dialog opened.
+- Header shows "Unsaved changes" when the draft differs from saved settings.
+- ADB reconnect, capture pipeline, chrome, shortcuts, and input prefs live-apply off the GTK thread where needed.
+- scrcpy options apply on the next mirror launch; updates manifest and watch settings apply on save only.

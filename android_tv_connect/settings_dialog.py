@@ -18,6 +18,7 @@ from .adb_discovery import (
     discover_adb_devices,
 )
 from .adb_settings import (
+    normalize_adb_config,
     normalize_wired_serial,
     normalize_wireless_host,
     parse_wireless_port,
@@ -46,6 +47,7 @@ from .settings_presets import (
     validate_adb_for_save,
     wireless_port_preset_index,
 )
+from .settings_draft import config_snapshot, configs_differ
 from .settings_store import save_config
 from .shortcuts import SHORTCUT_DEFINITIONS, SHORTCUT_HELP, validate_shortcut
 from .update_ui import check_for_updates
@@ -57,21 +59,33 @@ _AUTO_AUDIO_LABEL = "Auto (default source)"
 _MANUAL_LABEL = "Manual…"
 _CUSTOM_PORT_LABEL = "Custom…"
 _SEAMLESS_DOCS = "docs/SEAMLESS-UX.md"
+_LIVE_APPLY_DEBOUNCE_MS = 300
 
 
 class SettingsDialog(Adw.Window):
-    def __init__(self, parent: Gtk.Window, config: AppConfig, on_saved) -> None:
+    def __init__(
+        self,
+        parent: Gtk.Window,
+        config: AppConfig,
+        host,
+        on_saved,
+    ) -> None:
         super().__init__(transient_for=parent, modal=True)
-        self._config = config
+        self._host = host
+        self._saved_config = config_snapshot(config)
         self._on_saved = on_saved
+        self._closing_saved = False
+        self._suppress_live_apply = 0
+        self._live_apply_timer: int | None = None
         self.set_title("Android TV Connect Settings")
         self.set_default_size(520, 640)
 
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
-        header.set_title_widget(
-            Adw.WindowTitle(title="Settings", subtitle="Android TV Connect")
+        self._title_widget = Adw.WindowTitle(
+            title="Settings", subtitle="Android TV Connect"
         )
+        header.set_title_widget(self._title_widget)
         cancel = Gtk.Button(label="Cancel")
         cancel.connect("clicked", self._on_cancel)
         header.pack_start(cancel)
@@ -99,6 +113,7 @@ class SettingsDialog(Adw.Window):
         self.set_content(toolbar)
         self.connect("close-request", self._on_close_request)
         self._install_escape_close()
+        self._wire_live_apply_handlers()
 
     def _install_escape_close(self) -> None:
         controller = Gtk.ShortcutController()
@@ -112,14 +127,25 @@ class SettingsDialog(Adw.Window):
         self.add_controller(controller)
 
     def _on_escape_shortcut(self, *_args) -> bool:
-        self.close()
+        self._revert_and_close()
         return True
 
     def _on_close_request(self, *_args) -> bool:
+        if not self._closing_saved:
+            self._host.apply_settings_live(self._saved_config)
         return False
 
-    def _on_cancel(self, *_args) -> None:
+    def _revert_and_close(self) -> None:
+        if self._closing_saved:
+            self.close()
+            return
+        self._cancel_live_apply_timer()
+        self._host.apply_settings_live(self._saved_config)
+        self._closing_saved = True
         self.close()
+
+    def _on_cancel(self, *_args) -> None:
+        self._revert_and_close()
 
     def _show_info(self, heading: str, body: str) -> None:
         dialog = Adw.MessageDialog(
@@ -173,7 +199,7 @@ class SettingsDialog(Adw.Window):
         self._wired_manual = self._entry_row(
             "Wired serial (manual)",
             "USB serial from adb devices -l",
-            self._config.adb.wired_serial or "",
+            self._saved_config.adb.wired_serial or "",
         )
         self._wired_manual.set_visible(False)
         group.add(self._wired_manual)
@@ -185,7 +211,7 @@ class SettingsDialog(Adw.Window):
         self._wireless_manual = self._entry_row(
             "Wireless host (manual)",
             "IP or hostname when USB is unavailable",
-            self._config.adb.wireless_host,
+            self._saved_config.adb.wireless_host,
         )
         self._wireless_manual.set_visible(False)
         group.add(self._wireless_manual)
@@ -199,7 +225,7 @@ class SettingsDialog(Adw.Window):
         group.add(self._wireless_port_combo)
 
         self._wireless_port_custom = self._spin_row(
-            "Custom wireless port", float(self._config.adb.wireless_port), 1, 1024, 65535
+            "Custom wireless port", float(self._saved_config.adb.wireless_port), 1, 1024, 65535
         )
         self._wireless_port_custom.set_digits(0)
         self._wireless_port_custom.set_visible(False)
@@ -215,7 +241,7 @@ class SettingsDialog(Adw.Window):
         self._prefer_wired = self._switch_row(
             "Prefer wired ADB",
             "Use USB debugging before attempting wireless connect",
-            self._config.input.prefer_wired_adb,
+            self._saved_config.input.prefer_wired_adb,
         )
         group.add(self._prefer_wired)
 
@@ -227,52 +253,53 @@ class SettingsDialog(Adw.Window):
         group = Adw.PreferencesGroup(title="Screen mirror (scrcpy)")
         group.set_description(
             "Optional ADB screen mirror window. Uses the same wired or wireless "
-            "ADB target as remote control."
+            "ADB target as remote control. Option changes apply on the next mirror "
+            "launch (a running mirror is not restarted)."
         )
 
         self._scrcpy_auto = self._switch_row(
             "Auto-launch on ADB connect",
             "Open scrcpy when a device connects (off by default)",
-            self._config.scrcpy.auto_launch_on_connect,
+            self._saved_config.scrcpy.auto_launch_on_connect,
         )
         group.add(self._scrcpy_auto)
 
         self._scrcpy_bit_rate = Adw.ComboRow(title="Video bit rate")
         self._scrcpy_bit_rate.set_model(Gtk.StringList.new(list(BIT_RATE_PRESETS)))
-        self._scrcpy_bit_rate.set_selected(bit_rate_index(self._config.scrcpy.bit_rate))
+        self._scrcpy_bit_rate.set_selected(bit_rate_index(self._saved_config.scrcpy.bit_rate))
         group.add(self._scrcpy_bit_rate)
 
         max_labels = [label for label, _value in MAX_SIZE_PRESETS]
         self._scrcpy_max_size = Adw.ComboRow(title="Max size")
         self._scrcpy_max_size.set_model(Gtk.StringList.new(max_labels))
-        self._scrcpy_max_size.set_selected(max_size_index(self._config.scrcpy.max_size))
+        self._scrcpy_max_size.set_selected(max_size_index(self._saved_config.scrcpy.max_size))
         group.add(self._scrcpy_max_size)
 
         self._scrcpy_fullscreen = self._switch_row(
             "Start fullscreen",
             "Launch scrcpy in fullscreen mode",
-            self._config.scrcpy.fullscreen,
+            self._saved_config.scrcpy.fullscreen,
         )
         group.add(self._scrcpy_fullscreen)
 
         self._scrcpy_no_audio = self._switch_row(
             "No audio",
             "Disable audio forwarding (recommended for TV sticks)",
-            self._config.scrcpy.no_audio,
+            self._saved_config.scrcpy.no_audio,
         )
         group.add(self._scrcpy_no_audio)
 
         self._scrcpy_stay_awake = self._switch_row(
             "Stay awake",
             "Keep the device awake while mirroring",
-            self._config.scrcpy.stay_awake,
+            self._saved_config.scrcpy.stay_awake,
         )
         group.add(self._scrcpy_stay_awake)
 
         self._scrcpy_turn_off = self._switch_row(
             "Turn screen off",
             "Turn device screen off while mirroring (may not work on all TVs)",
-            self._config.scrcpy.turn_screen_off,
+            self._saved_config.scrcpy.turn_screen_off,
         )
         group.add(self._scrcpy_turn_off)
 
@@ -282,12 +309,12 @@ class SettingsDialog(Adw.Window):
         self._scrcpy_path = self._entry_row(
             "scrcpy path",
             "Leave empty to use scrcpy from PATH",
-            self._config.scrcpy.scrcpy_path,
+            self._saved_config.scrcpy.scrcpy_path,
         )
         self._scrcpy_title = self._entry_row(
             "Window title",
             "Title for the scrcpy window",
-            self._config.scrcpy.window_title,
+            self._saved_config.scrcpy.window_title,
         )
         advanced.add_row(self._scrcpy_path)
         advanced.add_row(self._scrcpy_title)
@@ -316,8 +343,32 @@ class SettingsDialog(Adw.Window):
     def _wireless_manual_index(self) -> int:
         return len(self._wireless_devices) + 1
 
+    def _wired_serial_for_selection(self) -> str:
+        if self._suppress_live_apply > 0:
+            return self._saved_config.adb.wired_serial
+        return normalize_wired_serial(self._wired_serial_value())
+
+    def _wireless_host_port_for_selection(self) -> tuple[str, int]:
+        if self._suppress_live_apply > 0:
+            return self._saved_config.adb.wireless_host, self._saved_config.adb.wireless_port
+        port = self._current_wireless_port()
+        parsed, err = parse_wireless_port(str(port))
+        if err or parsed is None:
+            parsed = self._saved_config.adb.wireless_port
+        return normalize_wireless_host(self._wireless_host_value()), parsed
+
+    def _video_device_for_selection(self) -> str:
+        if self._suppress_live_apply > 0:
+            return self._saved_config.capture.video_device
+        return self._video_device_value()
+
+    def _audio_device_for_selection(self) -> str:
+        if self._suppress_live_apply > 0:
+            return self._saved_config.capture.audio_device
+        return self._audio_device_value()
+
     def _select_wired_from_config(self) -> None:
-        serial = self._config.adb.wired_serial
+        serial = self._wired_serial_for_selection()
         if not serial:
             self._wired_combo.set_selected(0)
             self._wired_manual.set_visible(False)
@@ -334,8 +385,7 @@ class SettingsDialog(Adw.Window):
         self._wired_manual.set_visible(True)
 
     def _select_wireless_from_config(self) -> None:
-        host = self._config.adb.wireless_host
-        port = self._config.adb.wireless_port
+        host, port = self._wireless_host_port_for_selection()
         if wireless_host_is_auto(host):
             self._wireless_combo.set_selected(0)
             self._wireless_manual.set_visible(False)
@@ -362,7 +412,7 @@ class SettingsDialog(Adw.Window):
             self._wireless_port_custom.set_value(float(port))
 
     def _select_wireless_port_from_config(self) -> None:
-        self._select_wireless_port(self._config.adb.wireless_port)
+        self._select_wireless_port(self._saved_config.adb.wireless_port)
 
     def _on_wired_selection_changed(self, *_args) -> None:
         manual = self._wired_combo.get_selected() == self._wired_manual_index()
@@ -393,7 +443,7 @@ class SettingsDialog(Adw.Window):
         self._wired_combo.set_sensitive(False)
         self._wireless_combo.set_sensitive(False)
 
-        port = self._current_wireless_port() if not initial else self._config.adb.wireless_port
+        port = self._current_wireless_port() if not initial else self._saved_config.adb.wireless_port
 
         def work() -> None:
             try:
@@ -413,16 +463,21 @@ class SettingsDialog(Adw.Window):
         wireless: list[WirelessDeviceOption],
         initial: bool,
     ) -> bool:
-        self._wired_devices = wired
-        self._wireless_devices = wireless
-        self._set_combo_model(self._wired_combo, self._wired_combo_labels())
-        self._set_combo_model(self._wireless_combo, self._wireless_combo_labels())
-        self._select_wired_from_config()
-        self._select_wireless_from_config()
-        self._wired_combo.set_sensitive(True)
-        self._wireless_combo.set_sensitive(True)
-        self._refresh_button.set_sensitive(True)
-        self._refresh_button.set_label("Refresh")
+        self._suppress_live_apply += 1
+        try:
+            self._wired_devices = wired
+            self._wireless_devices = wireless
+            self._set_combo_model(self._wired_combo, self._wired_combo_labels())
+            self._set_combo_model(self._wireless_combo, self._wireless_combo_labels())
+            self._select_wired_from_config()
+            self._select_wireless_from_config()
+            self._wired_combo.set_sensitive(True)
+            self._wireless_combo.set_sensitive(True)
+            self._refresh_button.set_sensitive(True)
+            self._refresh_button.set_label("Refresh")
+        finally:
+            self._suppress_live_apply -= 1
+        self._update_unsaved_indicator()
         return False
 
     def _on_refresh_devices(self, *_args) -> None:
@@ -462,7 +517,7 @@ class SettingsDialog(Adw.Window):
         self._video_manual = self._entry_row(
             "Video device (manual)",
             "V4L2 node such as /dev/video1",
-            self._config.capture.video_device,
+            self._saved_config.capture.video_device,
         )
         self._video_manual.set_visible(False)
         group.add(self._video_manual)
@@ -471,7 +526,7 @@ class SettingsDialog(Adw.Window):
         self._resolution_combo = Adw.ComboRow(title="Resolution")
         self._resolution_combo.set_model(Gtk.StringList.new(resolution_labels))
         self._resolution_combo.set_selected(
-            resolution_index(self._config.capture.width, self._config.capture.height)
+            resolution_index(self._saved_config.capture.width, self._saved_config.capture.height)
         )
         group.add(self._resolution_combo)
 
@@ -479,7 +534,7 @@ class SettingsDialog(Adw.Window):
         self._fps_combo.set_model(
             Gtk.StringList.new([f"{value} fps" for value in FRAMERATE_PRESETS])
         )
-        self._fps_combo.set_selected(framerate_index(self._config.capture.framerate))
+        self._fps_combo.set_selected(framerate_index(self._saved_config.capture.framerate))
         group.add(self._fps_combo)
 
         self._audio_combo = Adw.ComboRow(title="Audio device")
@@ -489,7 +544,7 @@ class SettingsDialog(Adw.Window):
         self._audio_manual = self._entry_row(
             "Audio device (manual)",
             "PipeWire or PulseAudio source name",
-            self._config.capture.audio_device,
+            self._saved_config.capture.audio_device,
         )
         self._audio_manual.set_visible(False)
         group.add(self._audio_manual)
@@ -525,7 +580,7 @@ class SettingsDialog(Adw.Window):
         return len(self._audio_sources) + 1
 
     def _select_video_from_config(self) -> None:
-        configured = (self._config.capture.video_device or "").strip()
+        configured = (self._video_device_for_selection() or "").strip()
         if not configured or configured.lower() == "auto":
             self._video_combo.set_selected(0)
             self._video_manual.set_visible(False)
@@ -540,7 +595,7 @@ class SettingsDialog(Adw.Window):
         self._video_manual.set_visible(True)
 
     def _select_audio_from_config(self) -> None:
-        configured = (self._config.capture.audio_device or "").strip()
+        configured = (self._audio_device_for_selection() or "").strip()
         if not configured or configured.lower() == "auto":
             self._audio_combo.set_selected(0)
             self._audio_manual.set_visible(False)
@@ -583,16 +638,21 @@ class SettingsDialog(Adw.Window):
         video: list[VideoDeviceOption],
         audio: list[AudioSourceOption],
     ) -> bool:
-        self._video_devices = video
-        self._audio_sources = audio
-        self._set_combo_model(self._video_combo, self._video_combo_labels())
-        self._set_combo_model(self._audio_combo, self._audio_combo_labels())
-        self._select_video_from_config()
-        self._select_audio_from_config()
-        self._video_combo.set_sensitive(True)
-        self._audio_combo.set_sensitive(True)
-        self._capture_refresh_button.set_sensitive(True)
-        self._capture_refresh_button.set_label("Refresh")
+        self._suppress_live_apply += 1
+        try:
+            self._video_devices = video
+            self._audio_sources = audio
+            self._set_combo_model(self._video_combo, self._video_combo_labels())
+            self._set_combo_model(self._audio_combo, self._audio_combo_labels())
+            self._select_video_from_config()
+            self._select_audio_from_config()
+            self._video_combo.set_sensitive(True)
+            self._audio_combo.set_sensitive(True)
+            self._capture_refresh_button.set_sensitive(True)
+            self._capture_refresh_button.set_label("Refresh")
+        finally:
+            self._suppress_live_apply -= 1
+        self._update_unsaved_indicator()
         return False
 
     def _on_refresh_capture_devices(self, *_args) -> None:
@@ -644,31 +704,31 @@ class SettingsDialog(Adw.Window):
         self._auto_kbd = self._switch_row(
             "Click video to control",
             "Single click arms remote mode (arrows, scroll, tap). Double-click for keyboard.",
-            self._config.input.click_to_control,
+            self._saved_config.input.click_to_control,
         )
         self._release_unfocus = self._switch_row(
             "Release when unfocused",
             "Return to local mode when another app is focused",
-            self._config.input.release_on_unfocus,
+            self._saved_config.input.release_on_unfocus,
         )
         self._release_esc = self._switch_row(
             "Esc releases control",
             "Escape stops remote/keyboard capture without sending Back",
-            self._config.input.release_on_escape,
+            self._saved_config.input.release_on_escape,
         )
         self._scroll = self._spin_row(
-            "Scroll threshold", self._config.input.scroll_threshold, 1, 2, 40
+            "Scroll threshold", self._saved_config.input.scroll_threshold, 1, 2, 40
         )
         self._soft_unfocused = self._switch_row(
             "Soft buttons when unfocused",
             "Volume and remote buttons work while using other apps",
-            self._config.input.soft_buttons_work_unfocused,
+            self._saved_config.input.soft_buttons_work_unfocused,
         )
         self._default_mode = Adw.ComboRow(title="Default pointer mode")
         modes = Gtk.StringList.new(["D-pad navigation", "Mouse / touch"])
         self._default_mode.set_model(modes)
         self._default_mode.set_selected(
-            0 if self._config.input.default_pointer_mode == "nav" else 1
+            0 if self._saved_config.input.default_pointer_mode == "nav" else 1
         )
         group.add(self._auto_kbd)
         group.add(self._release_unfocus)
@@ -683,7 +743,7 @@ class SettingsDialog(Adw.Window):
         group.set_description(SHORTCUT_HELP)
         self._shortcut_rows: dict[str, Adw.EntryRow] = {}
         for action_id, label, default in SHORTCUT_DEFINITIONS:
-            row = self._entry_row(label, f"Default: {default}", self._config.shortcuts.get(action_id))
+            row = self._entry_row(label, f"Default: {default}", self._saved_config.shortcuts.get(action_id))
             self._shortcut_rows[action_id] = row
             group.add(row)
         return group
@@ -693,36 +753,36 @@ class SettingsDialog(Adw.Window):
         self._remember_geo = self._switch_row(
             "Remember geometry",
             "Restore window size and mode on launch",
-            self._config.window.remember_geometry,
+            self._saved_config.window.remember_geometry,
         )
         self._aspect = self._switch_row(
             "Lock 16:9 aspect",
             "Keep window aspect ratio when resizing",
-            self._config.window.aspect_ratio_locked,
+            self._saved_config.window.aspect_ratio_locked,
         )
         self._pip_hide = self._switch_row(
             "PiP bar auto-hide",
             "Hide soft buttons in PiP when unfocused",
-            self._config.window.pip.soft_bar_auto_hide,
+            self._saved_config.window.pip.soft_bar_auto_hide,
         )
         self._pip_opacity = self._spin_row(
-            "PiP opacity", self._config.window.pip.opacity, 0.05, 0.3, 1.0
+            "PiP opacity", self._saved_config.window.pip.opacity, 0.05, 0.3, 1.0
         )
         self._chrome_hide = self._switch_row(
             "Auto-hide chrome",
             "Hide header and remote bar after idle — even if the mouse is still over the window",
-            self._config.window.chrome_auto_hide,
+            self._saved_config.window.chrome_auto_hide,
         )
         self._chrome_delay = self._spin_row(
             "Chrome hide delay (ms)",
-            self._config.window.chrome_hide_delay_ms,
+            self._saved_config.window.chrome_hide_delay_ms,
             250,
             1000,
             15000,
         )
         self._banner_hide = self._spin_row(
             "Control banner hide (ms)",
-            self._config.window.banner_auto_hide_ms,
+            self._saved_config.window.banner_auto_hide_ms,
             500,
             0,
             30000,
@@ -730,7 +790,7 @@ class SettingsDialog(Adw.Window):
         self._bar_collapsed = self._switch_row(
             "Start with remote hidden",
             "Collapse the bottom remote bar on launch",
-            self._config.window.control_bar_collapsed,
+            self._saved_config.window.control_bar_collapsed,
         )
         group.add(self._remember_geo)
         group.add(self._aspect)
@@ -752,18 +812,18 @@ class SettingsDialog(Adw.Window):
         self._auto_check_updates = self._switch_row(
             "Check on launch",
             "Let the launcher look for updates when you start the app",
-            self._config.updates.auto_check_on_launch,
+            self._saved_config.updates.auto_check_on_launch,
         )
         group.add(self._auto_check_updates)
 
         self._manifest_override = self._entry_row(
             "Manifest URL override",
             "Leave empty to use the default GitHub releases endpoint",
-            self._config.updates.manifest_url_override,
+            self._saved_config.updates.manifest_url_override,
         )
         group.add(self._manifest_override)
 
-        notes_text = self._config.updates.last_release_notes.strip()
+        notes_text = self._saved_config.updates.last_release_notes.strip()
         self._release_notes_row = Adw.ActionRow(
             title="Latest release notes",
             subtitle=notes_text or "Run “Check for updates now” to fetch notes",
@@ -869,49 +929,159 @@ class SettingsDialog(Adw.Window):
         self._watch_enable = self._switch_row(
             "Enable device watcher",
             "Auto-launch when capture dongle and ADB device are ready",
-            self._config.watch_autostart_enabled,
+            self._saved_config.watch_autostart_enabled,
         )
         self._watch_poll = self._spin_row(
-            "Poll interval (s)", self._config.watch_poll_interval_s, 0.5, 1, 30
+            "Poll interval (s)", self._saved_config.watch_poll_interval_s, 0.5, 1, 30
         )
         group.add(self._watch_enable)
         group.add(self._watch_poll)
         return group
 
-    def _on_save(self, *_args) -> None:
-        shortcuts_kwargs = {}
-        for action_id, _label, _default in SHORTCUT_DEFINITIONS:
+    def _wire_live_apply_handlers(self) -> None:
+        switches = [
+            self._prefer_wired,
+            self._scrcpy_auto,
+            self._scrcpy_fullscreen,
+            self._scrcpy_no_audio,
+            self._scrcpy_stay_awake,
+            self._scrcpy_turn_off,
+            self._auto_kbd,
+            self._release_unfocus,
+            self._release_esc,
+            self._soft_unfocused,
+            self._remember_geo,
+            self._aspect,
+            self._pip_hide,
+            self._chrome_hide,
+            self._bar_collapsed,
+            self._auto_check_updates,
+            self._watch_enable,
+        ]
+        for widget in switches:
+            widget.connect("notify::active", self._on_control_changed)
+
+        combos = [
+            self._wired_combo,
+            self._wireless_combo,
+            self._wireless_port_combo,
+            self._scrcpy_bit_rate,
+            self._scrcpy_max_size,
+            self._resolution_combo,
+            self._fps_combo,
+            self._video_combo,
+            self._audio_combo,
+            self._default_mode,
+        ]
+        for widget in combos:
+            widget.connect("notify::selected", self._on_control_changed)
+
+        spins = [
+            self._wireless_port_custom,
+            self._scroll,
+            self._pip_opacity,
+            self._chrome_delay,
+            self._banner_hide,
+            self._watch_poll,
+        ]
+        for widget in spins:
+            widget.connect("notify::value", self._on_control_changed)
+
+        entries = [
+            self._wired_manual,
+            self._wireless_manual,
+            self._video_manual,
+            self._audio_manual,
+            self._scrcpy_path,
+            self._scrcpy_title,
+            self._manifest_override,
+        ]
+        for widget in entries:
+            widget.connect("notify::text", self._on_control_changed)
+        for row in self._shortcut_rows.values():
+            row.connect("notify::text", self._on_control_changed)
+
+    def _on_control_changed(self, *_args) -> None:
+        if self._suppress_live_apply > 0:
+            return
+        self._update_unsaved_indicator()
+        self._schedule_live_apply()
+
+    def _cancel_live_apply_timer(self) -> None:
+        if self._live_apply_timer is not None:
+            GLib.source_remove(self._live_apply_timer)
+            self._live_apply_timer = None
+
+    def _schedule_live_apply(self) -> None:
+        self._cancel_live_apply_timer()
+        self._live_apply_timer = GLib.timeout_add(
+            _LIVE_APPLY_DEBOUNCE_MS,
+            self._do_live_apply,
+        )
+
+    def _do_live_apply(self) -> bool:
+        self._live_apply_timer = None
+        draft = self._assemble_config(strict=False, live=True)
+        if draft is not None:
+            self._host.apply_settings_live(draft)
+        return False
+
+    def _update_unsaved_indicator(self) -> None:
+        draft = self._assemble_config(strict=False, live=False)
+        dirty = draft is not None and configs_differ(draft, self._saved_config)
+        self._title_widget.set_subtitle(
+            "Unsaved changes" if dirty else "Android TV Connect"
+        )
+
+    def _assemble_config(
+        self,
+        *,
+        strict: bool,
+        live: bool = False,
+    ) -> AppConfig | None:
+        shortcuts_kwargs: dict[str, str] = {}
+        for action_id, label, _default in SHORTCUT_DEFINITIONS:
             value = self._shortcut_rows[action_id].get_text().strip()
             ok, err = validate_shortcut(value)
-            if not ok:
-                self._show_error("Invalid shortcut", f"{_label}: {err}")
-                return
-            shortcuts_kwargs[action_id] = value
+            if ok:
+                shortcuts_kwargs[action_id] = value
+            elif strict:
+                self._show_error("Invalid shortcut", f"{label}: {err}")
+                return None
+            else:
+                shortcuts_kwargs[action_id] = self._saved_config.shortcuts.get(action_id)
 
-        shortcuts = replace(self._config.shortcuts, **shortcuts_kwargs)
+        shortcuts = replace(self._saved_config.shortcuts, **shortcuts_kwargs)
 
         wireless_host_raw = self._wireless_host_value()
         port = self._current_wireless_port()
         port, port_err = parse_wireless_port(str(port))
         if port_err or port is None:
-            self._show_error("Invalid wireless port", port_err or "Invalid wireless port")
-            return
+            if strict:
+                self._show_error(
+                    "Invalid wireless port", port_err or "Invalid wireless port"
+                )
+                return None
+            port = self._saved_config.adb.wireless_port
 
         adb = replace(
-            self._config.adb,
+            self._saved_config.adb,
             wired_serial=normalize_wired_serial(self._wired_serial_value()),
             wireless_host=normalize_wireless_host(wireless_host_raw),
             wireless_port=port,
         )
-        adb, adb_err = validate_adb_for_save(adb)
-        if adb_err or adb is None:
-            self._show_error("Invalid ADB settings", adb_err or "Invalid ADB settings")
-            return
+        if strict:
+            adb, adb_err = validate_adb_for_save(adb)
+            if adb_err or adb is None:
+                self._show_error("Invalid ADB settings", adb_err or "Invalid ADB settings")
+                return None
+        else:
+            adb = normalize_adb_config(adb)
 
         width, height = self._resolution_value()
         capture = normalize_capture_config(
             replace(
-                self._config.capture,
+                self._saved_config.capture,
                 video_device=self._video_device_value(),
                 audio_device=self._audio_device_value(),
                 width=width,
@@ -921,7 +1091,7 @@ class SettingsDialog(Adw.Window):
         )
         scrcpy = normalize_scrcpy_config(
             replace(
-                self._config.scrcpy,
+                self._saved_config.scrcpy,
                 auto_launch_on_connect=self._scrcpy_auto.get_active(),
                 scrcpy_path=self._scrcpy_path.get_text().strip(),
                 max_size=self._scrcpy_max_size_value(),
@@ -934,7 +1104,7 @@ class SettingsDialog(Adw.Window):
             )
         )
         input_cfg = replace(
-            self._config.input,
+            self._saved_config.input,
             prefer_wired_adb=self._prefer_wired.get_active(),
             click_to_control=self._auto_kbd.get_active(),
             release_on_unfocus=self._release_unfocus.get_active(),
@@ -944,7 +1114,7 @@ class SettingsDialog(Adw.Window):
             default_pointer_mode="nav" if self._default_mode.get_selected() == 0 else "mouse",
         )
         window = replace(
-            self._config.window,
+            self._saved_config.window,
             remember_geometry=self._remember_geo.get_active(),
             aspect_ratio_locked=self._aspect.get_active(),
             chrome_auto_hide=self._chrome_hide.get_active(),
@@ -952,30 +1122,46 @@ class SettingsDialog(Adw.Window):
             banner_auto_hide_ms=int(self._banner_hide.get_value()),
             control_bar_collapsed=self._bar_collapsed.get_active(),
             pip=replace(
-                self._config.window.pip,
+                self._saved_config.window.pip,
                 soft_bar_auto_hide=self._pip_hide.get_active(),
                 opacity=self._pip_opacity.get_value(),
             ),
         )
-        updated = replace(
-            self._config,
+
+        if live:
+            updates = self._saved_config.updates
+            watch_enabled = self._saved_config.watch_autostart_enabled
+            watch_poll = self._saved_config.watch_poll_interval_s
+        else:
+            updates = replace(
+                self._saved_config.updates,
+                auto_check_on_launch=self._auto_check_updates.get_active(),
+                manifest_url_override=self._manifest_override.get_text().strip(),
+                last_release_notes=self._release_notes_row.get_subtitle() or "",
+            )
+            watch_enabled = self._watch_enable.get_active()
+            watch_poll = self._watch_poll.get_value()
+
+        return replace(
+            self._saved_config,
             adb=adb,
             capture=capture,
             scrcpy=scrcpy,
             input=input_cfg,
             shortcuts=shortcuts,
             window=window,
-            updates=replace(
-                self._config.updates,
-                auto_check_on_launch=self._auto_check_updates.get_active(),
-                manifest_url_override=self._manifest_override.get_text().strip(),
-                last_release_notes=self._release_notes_row.get_subtitle() or "",
-            ),
-            watch_autostart_enabled=self._watch_enable.get_active(),
-            watch_poll_interval_s=self._watch_poll.get_value(),
+            updates=updates,
+            watch_autostart_enabled=watch_enabled,
+            watch_poll_interval_s=watch_poll,
         )
+
+    def _on_save(self, *_args) -> None:
+        updated = self._assemble_config(strict=True, live=False)
+        if updated is None:
+            return
         save_config(updated)
-        self._config = updated
+        self._cancel_live_apply_timer()
+        self._closing_saved = True
         callback = self._on_saved
         self.close()
         GLib.idle_add(self._deliver_saved_config, callback, updated)

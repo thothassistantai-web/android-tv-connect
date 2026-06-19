@@ -59,7 +59,6 @@ is_dev_checkout() {
 install_launcher_package() {
     if is_dev_checkout && [[ -d "${ROOT}/android_tv_connect_launcher" ]]; then
         info "Using checkout launcher at ${ROOT} (app_home dev mode)"
-        return
     fi
 
     info "Installing launcher to ${LAUNCHER_DIR}"

@@ -141,6 +141,26 @@ class ManifestParseTests(unittest.TestCase):
         self.assertEqual(headers["User-Agent"], manifest.USER_AGENT)
         self.assertEqual(headers["Authorization"], "Bearer secret-token")
 
+    def test_http_403_rate_limit_message(self) -> None:
+        import io
+        import urllib.error
+
+        body = json.dumps({"message": "API rate limit exceeded"})
+        exc = urllib.error.HTTPError(
+            "https://api.github.com/repos/org/repo/releases/latest",
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(body.encode()),
+        )
+
+        with patch.object(manifest.urllib.request, "urlopen", side_effect=exc):
+            with self.assertRaises(manifest.ManifestFetchError) as ctx:
+                manifest._request_text("https://api.github.com/repos/org/repo/releases/latest")
+
+        self.assertIn("rate limit", str(ctx.exception).lower())
+        self.assertIn("GITHUB_TOKEN", str(ctx.exception))
+
 
 class SymlinkTests(unittest.TestCase):
     def test_resolve_data_root_from_env(self) -> None:

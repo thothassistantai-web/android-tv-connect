@@ -24,31 +24,56 @@ class UpdateCheckResponse:
     error: str = ""
 
 
-def _launcher_command(*extra: str) -> list[str]:
-    launcher_root = Path.home() / ".local" / "share" / "android-tv-connect" / "launcher"
-    if launcher_root.is_dir():
-        env_root = str(launcher_root)
-        return [
-            sys.executable,
-            "-m",
-            "android_tv_connect_launcher",
-            *extra,
-        ], env_root
+def _resolve_launcher_root() -> Path | None:
+    """Match launcher_dir() / install-local.sh: app_home checkout, then launcher copy."""
+    try:
+        from android_tv_connect_launcher.paths import launcher_dir
+
+        root = launcher_dir()
+        if (root / "android_tv_connect_launcher").is_dir():
+            return root
+    except ImportError:
+        pass
 
     repo_root = Path(__file__).resolve().parent.parent
     if (repo_root / "android_tv_connect_launcher").is_dir():
+        return repo_root
+
+    default_launcher = (
+        Path.home() / ".local" / "share" / "android-tv-connect" / "launcher"
+    )
+    if (default_launcher / "android_tv_connect_launcher").is_dir():
+        return default_launcher
+
+    return None
+
+
+def _launcher_command(*extra: str) -> tuple[list[str], dict[str, str]]:
+    launcher_root = _resolve_launcher_root()
+    env: dict[str, str] = {}
+
+    if launcher_root is not None:
+        env["PYTHONPATH"] = str(launcher_root)
+        try:
+            from android_tv_connect_launcher.paths import resolve_data_root
+
+            env["ATV_CONNECT_HOME"] = str(resolve_data_root())
+        except ImportError:
+            pass
         return [
             sys.executable,
             "-m",
             "android_tv_connect_launcher",
             *extra,
-        ], str(repo_root)
+        ], env
 
     atv = shutil.which("atv-connect")
     if atv:
-        return [atv, *extra], ""
+        return [atv, *extra], env
 
-    return [sys.executable, "-m", "android_tv_connect_launcher", *extra], str(repo_root)
+    repo_root = Path(__file__).resolve().parent.parent
+    env["PYTHONPATH"] = str(repo_root)
+    return [sys.executable, "-m", "android_tv_connect_launcher", *extra], env
 
 
 def check_for_updates(*, apply: bool = False) -> UpdateCheckResponse:
@@ -56,10 +81,13 @@ def check_for_updates(*, apply: bool = False) -> UpdateCheckResponse:
     if apply:
         args.append("--apply-updates")
 
-    cmd, pythonpath_root = _launcher_command(*args)
+    cmd, launcher_env = _launcher_command(*args)
     env = os.environ.copy()
-    if pythonpath_root:
-        env["PYTHONPATH"] = pythonpath_root + os.pathsep + env.get("PYTHONPATH", "")
+    for key, value in launcher_env.items():
+        if key == "PYTHONPATH" and key in env:
+            env[key] = value + os.pathsep + env[key]
+        else:
+            env[key] = value
 
     try:
         proc = subprocess.run(

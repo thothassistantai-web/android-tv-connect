@@ -1,0 +1,5 @@
+Fix in-app “Check for updates” using a stale launcher copy when app_home points at a dev checkout.
+
+- Settings → Updates now resolves the launcher via app_home / ATV_CONNECT_HOME (same as atv-connect CLI).
+- install-local.sh always refreshes the isolated launcher copy under app_home.
+- Clearer GitHub API rate-limit errors; manifest fetch still falls back to update-manifest.json.

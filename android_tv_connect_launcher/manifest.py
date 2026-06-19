@@ -67,6 +67,7 @@ def _request_text(
             return response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = ""
+        message = ""
         try:
             body = exc.read().decode("utf-8", errors="replace")
             payload = json.loads(body)
@@ -76,6 +77,15 @@ def _request_text(
                     detail = f": {message}"
         except (OSError, ValueError, json.JSONDecodeError):
             pass
+        if exc.code == 403 and (
+            "rate limit" in message.lower() or not message
+        ):
+            hint = (
+                "GitHub API rate limit or access denied. "
+                "Set GITHUB_TOKEN (or updates.github_token in config) and retry, "
+                "or wait and try again."
+            )
+            raise ManifestFetchError(f"{hint}{detail}") from exc
         raise ManifestFetchError(f"HTTP {exc.code} for {url}{detail}") from exc
     except urllib.error.URLError as exc:
         raise ManifestFetchError(f"Network error for {url}: {exc.reason}") from exc
@@ -258,5 +268,6 @@ def fetch_update_manifest(
             return _fetch_manifest_from_url(fallback_url, github_token=token)
         except ManifestFetchError as fallback_exc:
             raise ManifestFetchError(
-                f"{primary_exc}; fallback also failed: {fallback_exc}"
+                f"Update check failed ({primary_exc}). "
+                f"Fallback manifest also failed ({fallback_exc})."
             ) from fallback_exc

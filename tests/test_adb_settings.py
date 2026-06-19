@@ -40,10 +40,10 @@ class AdbSettingsTests(unittest.TestCase):
         self.assertEqual(adb.wired_serial, "")
 
     def test_normalize_wireless_host_auto(self) -> None:
-        self.assertEqual(normalize_wireless_host("auto", default="1.2.3.4"), "")
+        self.assertEqual(normalize_wireless_host("auto"), "")
         self.assertTrue(wireless_host_is_auto(""))
         self.assertTrue(wireless_host_is_auto("AUTO"))
-        self.assertEqual(normalize_wireless_host("192.168.1.5", default="1.2.3.4"), "192.168.1.5")
+        self.assertEqual(normalize_wireless_host("192.168.1.5"), "192.168.1.5")
 
     def test_auto_discover_usb_device(self) -> None:
         client = AdbClient(wired_serial="")

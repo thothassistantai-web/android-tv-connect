@@ -39,6 +39,8 @@ class CompactHeader:
         right = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         self._pip_btn = self._icon_btn("view-restore-symbolic", "PiP")
         self._fs_btn = self._icon_btn("fullscreen-symbolic", "Fullscreen")
+        self._refresh_btn = self._icon_btn("view-refresh-symbolic", "Refresh & connect")
+        self._refresh_btn.connect("clicked", self._on_refresh)
         self._settings_btn = self._icon_btn("emblem-system-symbolic", "Settings")
         self._about_btn = self._icon_btn("help-about-symbolic", "About")
         self._pip_btn.connect("clicked", self._on_pip)
@@ -47,6 +49,7 @@ class CompactHeader:
         self._about_btn.connect("clicked", self._on_about)
         right.append(self._pip_btn)
         right.append(self._fs_btn)
+        right.append(self._refresh_btn)
         right.append(self._settings_btn)
         right.append(self._about_btn)
         header.pack_end(right)
@@ -70,6 +73,10 @@ class CompactHeader:
     def _on_fullscreen(self, *_args) -> None:
         self._host.bump_chrome()
         self._host.toggle_fullscreen()
+
+    def _on_refresh(self, *_args) -> None:
+        self._host.bump_chrome()
+        self._host.refresh_and_connect()
 
     def _on_settings(self, *_args) -> None:
         self._host.bump_chrome()
@@ -137,8 +144,15 @@ class CompactHeader:
         dot.remove_css_class("status-bad")
         dot.add_css_class("status-ok" if ok else "status-bad")
 
+    def set_chip_label(self, chip: Gtk.Button, text: str) -> None:
+        chip._label.set_text(text)  # type: ignore[attr-defined]
+
     def set_chip_tooltip(self, chip: Gtk.Button, text: str) -> None:
         chip.set_tooltip_text(text)
+
+    def set_chip_label(self, chip: Gtk.Button, text: str) -> None:
+        label = chip._label  # type: ignore[attr-defined]
+        label.set_text(text)
 
     def update_tooltips(self, pip: str, fullscreen: str) -> None:
         self._pip_btn.set_tooltip_text(f"Picture-in-Picture ({pip})")

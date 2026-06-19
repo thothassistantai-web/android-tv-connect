@@ -13,8 +13,8 @@ WINDOW_CONFIG_PATH = CONFIG_DIR / "window.toml"
 
 @dataclass(frozen=True)
 class AdbConfig:
-    wired_serial: str = "FUSA2541006925"
-    wireless_host: str = "192.168.1.157"
+    wired_serial: str = ""
+    wireless_host: str = ""
     wireless_port: int = 5555
 
 

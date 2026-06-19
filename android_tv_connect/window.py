@@ -21,7 +21,17 @@ from .capture import CapturePipeline
 from .about import show_about_dialog
 from .branding import APP_NAME, APP_ID, ICON_NAME
 from .chrome import ChromeAutoHide, CompactHeader
+from .capture_device import invalidate_capture_cache, is_capture_usb_present
 from .config import AppConfig
+from .connection_ui import (
+    capture_adb_mismatch_warning,
+    connection_toast_message,
+    detect_hotplug_switch,
+    format_adb_chip_label,
+    format_adb_chip_tooltip,
+    format_capture_chip_label,
+    format_capture_chip_tooltip,
+)
 from .control_bar import ControlBarShell
 from .geometry import (
     SavedGeometry,
@@ -124,6 +134,26 @@ class VideoSurface(Gtk.Box):
         banner_box.append(release_btn)
         self._capture_banner.set_child(banner_box)
         self._overlay_container.add_overlay(self._capture_banner)
+
+        self._mismatch_banner = Gtk.Revealer()
+        self._mismatch_banner.set_reveal_child(False)
+        self._mismatch_banner.set_valign(Gtk.Align.START)
+        self._mismatch_banner.set_halign(Gtk.Align.FILL)
+        self._mismatch_banner.set_margin_top(48)
+        self._mismatch_banner.set_margin_start(12)
+        self._mismatch_banner.set_margin_end(12)
+        mismatch_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        mismatch_box.add_css_class("caption")
+        mismatch_box.add_css_class("control-banner")
+        self._mismatch_banner_label = Gtk.Label(xalign=0.0)
+        self._mismatch_banner_label.set_wrap(True)
+        self._mismatch_banner_label.set_hexpand(True)
+        mismatch_box.append(self._mismatch_banner_label)
+        mismatch_dismiss = Gtk.Button(label="Dismiss")
+        mismatch_dismiss.connect("clicked", lambda *_: self._host.dismiss_mismatch_banner())
+        mismatch_box.append(mismatch_dismiss)
+        self._mismatch_banner.set_child(mismatch_box)
+        self._overlay_container.add_overlay(self._mismatch_banner)
 
         self._hint_revealer = Gtk.Revealer()
         self._hint_revealer.set_reveal_child(False)
@@ -399,6 +429,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._settings_dialog: SettingsDialog | None = None
         self._scrcpy = ScrcpySession(on_state_change=self._on_scrcpy_state_changed)
         self._scrcpy_launch_pending = False
+        self._known_usb_serials: set[str] = set()
+        self._hotplug_dismissed: set[str] = set()
 
         self.set_title(APP_NAME)
         self.set_icon_name(ICON_NAME)
@@ -412,6 +444,23 @@ class MainWindow(Adw.ApplicationWindow):
         )
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        self._mismatch_banner = Gtk.Revealer()
+        self._mismatch_banner.set_reveal_child(False)
+        mismatch_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        mismatch_box.add_css_class("caption")
+        mismatch_box.add_css_class("control-banner")
+        mismatch_box.set_margin_top(4)
+        mismatch_box.set_margin_bottom(4)
+        mismatch_box.set_margin_start(8)
+        mismatch_box.set_margin_end(8)
+        mismatch_box.set_halign(Gtk.Align.FILL)
+        self._mismatch_banner_label = Gtk.Label(xalign=0)
+        self._mismatch_banner_label.set_wrap(True)
+        self._mismatch_banner_label.set_hexpand(True)
+        mismatch_box.append(self._mismatch_banner_label)
+        self._mismatch_banner.set_child(mismatch_box)
+        root.append(self._mismatch_banner)
 
         self._toolbar = Adw.ToolbarView()
         self._headerbar = Adw.HeaderBar()
@@ -448,7 +497,9 @@ class MainWindow(Adw.ApplicationWindow):
         root.append(self._content_overlay)
 
         self._toolbar.set_content(root)
-        self.set_content(self._toolbar)
+        self._toast_overlay = Adw.ToastOverlay()
+        self._toast_overlay.set_child(self._toolbar)
+        self.set_content(self._toast_overlay)
 
         self._chrome = ChromeAutoHide(
             self._control_shell,
@@ -478,8 +529,10 @@ class MainWindow(Adw.ApplicationWindow):
         self._install_shortcuts()
         self._apply_mode(self._mode, initial=True)
         self._adb.connect()
+        self._known_usb_serials = set(self._adb.list_usb_serials())
         self._update_status_dots()
         GLib.timeout_add_seconds(2, self._status_tick)
+        GLib.timeout_add_seconds(30, self._hotplug_poll)
 
         self._capture.attach_video_widget(self._video.video_host)
         if not self._capture.start():
@@ -541,6 +594,112 @@ class MainWindow(Adw.ApplicationWindow):
             InputMode.KEYBOARD if active else InputMode.LOCAL,
             source=source,
         )
+
+    def refresh_and_connect(self) -> None:
+        threading.Thread(
+            target=self._refresh_connect_worker,
+            daemon=True,
+            name="refresh-connect",
+        ).start()
+
+    def _refresh_connect_worker(self) -> None:
+        invalidate_capture_cache()
+        connected = self._adb.refresh_connection()
+        capture_ok = True
+        if self._capture.is_running():
+            self._capture.stop()
+            capture_ok = self._capture.start()
+        GLib.idle_add(self._on_refresh_connect_done, connected, capture_ok)
+
+    def _on_refresh_connect_done(self, connected: bool, capture_ok: bool) -> bool:
+        self._known_usb_serials = set(self._adb.list_usb_serials())
+        self._update_status_dots()
+        if connected:
+            serial = self._adb.active_serial()
+            if serial:
+                self._show_toast(
+                    connection_toast_message(
+                        serial,
+                        is_wireless=self._adb.is_wireless_active(),
+                    )
+                )
+            if self._capture.state == "playing" and self._input_mode == InputMode.LOCAL:
+                self._video.set_status(None)
+        else:
+            self._video.set_status("ADB connection failed — use Refresh & connect")
+        if not capture_ok and self._capture.is_running() is False:
+            self._video.set_status("Capture device not ready")
+        return False
+
+    def _show_toast(
+        self,
+        message: str,
+        *,
+        button_label: str | None = None,
+        on_button=None,
+        timeout: int = 5,
+    ) -> Adw.Toast:
+        toast = Adw.Toast.new(message)
+        toast.set_timeout(timeout)
+        if button_label:
+            toast.set_button_label(button_label)
+            if on_button is not None:
+                toast.connect("button-clicked", on_button)
+        self._toast_overlay.add_toast(toast)
+        return toast
+
+    def _hotplug_watch_serial(self) -> str | None:
+        configured = self._config.adb.wired_serial.strip()
+        if configured:
+            return configured
+        active = self._adb.active_serial()
+        if active and ":" not in active:
+            return active
+        return None
+
+    def _check_hotplug(self) -> None:
+        current = set(self._adb.list_usb_serials())
+        new_serial = detect_hotplug_switch(
+            previous_usb=self._known_usb_serials,
+            current_usb=current,
+            watch_serial=self._hotplug_watch_serial(),
+            dismissed=self._hotplug_dismissed,
+        )
+        self._known_usb_serials = current
+        if new_serial:
+            self._offer_hotplug_switch(new_serial)
+
+    def _offer_hotplug_switch(self, serial: str) -> None:
+        toast = Adw.Toast.new(f"New device detected: {serial} — Switch?")
+        toast.set_button_label("Switch")
+        toast.set_timeout(12)
+
+        def on_switch(_toast: Adw.Toast) -> None:
+            self._hotplug_dismissed.add(serial)
+            config = replace(
+                self._config,
+                adb=replace(self._config.adb, wired_serial=serial),
+            )
+            self._config = config
+            save_config(config)
+            self._adb.update_settings(
+                wired_serial=serial,
+                wireless_host=config.adb.wireless_host,
+                wireless_port=config.adb.wireless_port,
+                prefer_wired=config.input.prefer_wired_adb,
+            )
+            self._show_toast(f"Switched ADB to {serial}")
+
+        def on_dismissed(_toast: Adw.Toast) -> None:
+            self._hotplug_dismissed.add(serial)
+
+        toast.connect("button-clicked", on_switch)
+        toast.connect("dismissed", on_dismissed)
+        self._toast_overlay.add_toast(toast)
+
+    def _hotplug_poll(self) -> bool:
+        self._check_hotplug()
+        return True
 
     def open_settings(self) -> None:
         self.set_input_mode(InputMode.LOCAL, source="settings")
@@ -719,19 +878,7 @@ class MainWindow(Adw.ApplicationWindow):
             else:
                 self.set_input_mode(InputMode.LOCAL, source="adb_chip")
             return
-        threading.Thread(target=self._adb_chip_connect_worker, daemon=True).start()
-
-    def _adb_chip_connect_worker(self) -> None:
-        connected = self._adb.connect()
-        GLib.idle_add(self._on_adb_chip_connect_done, connected)
-
-    def _on_adb_chip_connect_done(self, connected: bool) -> bool:
-        self._update_status_dots()
-        if not connected:
-            self._video.set_status("ADB connection failed — click ADB to retry")
-        elif self._capture.state == "playing" and self._input_mode == InputMode.LOCAL:
-            self._video.set_status(None)
-        return False
+        self.refresh_and_connect()
 
     def on_capture_chip_clicked(self) -> None:
         if self._capture.state == "playing":
@@ -747,31 +894,53 @@ class MainWindow(Adw.ApplicationWindow):
         capture_playing = self._capture.state == "playing"
         adb_connected = self._adb.is_connected()
         mirror_running = self._scrcpy.is_running()
+        adb_serial = self._adb.active_serial()
+        adb_wireless = self._adb.is_wireless_active()
+        capture_device = self._capture.effective_video_device
+
         self._compact_header.set_dot(self._compact_header.capture_chip, capture_playing)
         self._compact_header.set_dot(self._compact_header.adb_chip, adb_connected)
         self._compact_header.set_dot(self._compact_header.mirror_chip, mirror_running)
 
-        if capture_playing:
-            capture_tip = "Capture live — click to pause video"
-        elif self._capture.user_paused:
-            capture_tip = "Capture paused — click to resume"
-        elif self._capture.state == "disconnected":
-            capture_tip = "Capture USB disconnected — click to retry when reconnected"
-        else:
-            capture_tip = "Capture offline — click to reconnect"
+        self._compact_header.set_chip_label(
+            self._compact_header.capture_chip,
+            format_capture_chip_label(device=capture_device, playing=capture_playing),
+        )
         self._compact_header.set_chip_tooltip(
             self._compact_header.capture_chip,
-            capture_tip,
+            format_capture_chip_tooltip(
+                device=capture_device,
+                playing=capture_playing,
+                user_paused=self._capture.user_paused,
+                state=self._capture.state,
+            ),
         )
 
         if adb_connected:
-            if self._input_mode == InputMode.LOCAL:
-                adb_tip = "ADB connected — click to take remote control"
-            else:
-                adb_tip = "Controlling TV — click to release control"
+            action_hint = (
+                "click to take remote control"
+                if self._input_mode == InputMode.LOCAL
+                else "click to release control"
+            )
         else:
-            adb_tip = "ADB offline — click to connect"
-        self._compact_header.set_chip_tooltip(self._compact_header.adb_chip, adb_tip)
+            action_hint = "click Refresh & connect"
+        self._compact_header.set_chip_label(
+            self._compact_header.adb_chip,
+            format_adb_chip_label(
+                connected=adb_connected,
+                serial=adb_serial,
+                is_wireless=adb_wireless,
+            ),
+        )
+        self._compact_header.set_chip_tooltip(
+            self._compact_header.adb_chip,
+            format_adb_chip_tooltip(
+                connected=adb_connected,
+                serial=adb_serial,
+                is_wireless=adb_wireless,
+                action_hint=action_hint,
+            ),
+        )
 
         if mirror_running:
             transport = self._scrcpy.active_transport_label(self._adb)
@@ -788,6 +957,22 @@ class MainWindow(Adw.ApplicationWindow):
             self._compact_header.mirror_chip,
             mirror_tip,
         )
+
+        usb_serials = self._adb.list_usb_serials()
+        wireless_count = len(self._adb.list_wireless_devices())
+        mismatch = capture_adb_mismatch_warning(
+            capture_usb_present=is_capture_usb_present(self._config.capture),
+            adb_connected=adb_connected,
+            adb_serial=adb_serial,
+            adb_is_wireless=adb_wireless,
+            usb_serials=usb_serials,
+            wireless_count=wireless_count,
+        )
+        if mismatch:
+            self._mismatch_banner_label.set_text(mismatch)
+            self._mismatch_banner.set_reveal_child(True)
+        else:
+            self._mismatch_banner.set_reveal_child(False)
 
     def _on_adb_connection_changed(self, connected: bool) -> None:
         GLib.idle_add(self._refresh_status_dots)
@@ -928,6 +1113,7 @@ class MainWindow(Adw.ApplicationWindow):
                 self.set_input_mode(InputMode.LOCAL, source="unfocus")
         else:
             self._video.update_input_mode(self._input_mode)
+            self._check_hotplug()
 
         if self._mode != MODE_PIP:
             return

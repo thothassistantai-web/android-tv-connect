@@ -30,8 +30,10 @@ from .settings_store import save_config
 from .shortcuts import SHORTCUT_DEFINITIONS, SHORTCUT_HELP, validate_shortcut
 from .update_ui import check_for_updates
 
-_AUTO_LABEL = "Auto (first available)"
+_AUTO_WIRED_LABEL = "Auto (first USB)"
+_AUTO_WIRELESS_LABEL = "Auto (first wireless)"
 _MANUAL_LABEL = "Manual…"
+_SEAMLESS_DOCS = "docs/SEAMLESS-UX.md"
 
 
 class SettingsDialog(Adw.Window):
@@ -116,7 +118,10 @@ class SettingsDialog(Adw.Window):
     def _adb_group(self) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup(title="ADB Connection")
         group.set_description(
-            "Pick a discovered device or choose Manual for a custom serial or IP."
+            "Choose a discovered device or Manual for a custom serial or IP. "
+            "Leave on Auto to connect to the first available device. "
+            "HDMI capture and ADB are independent — video uses the capture card "
+            "while remote control uses ADB."
         )
 
         self._wired_devices: list[WiredDeviceOption] = []
@@ -243,13 +248,13 @@ class SettingsDialog(Adw.Window):
         return group
 
     def _wired_combo_labels(self) -> list[str]:
-        labels = [_AUTO_LABEL]
+        labels = [_AUTO_WIRED_LABEL]
         labels.extend(device.description for device in self._wired_devices)
         labels.append(_MANUAL_LABEL)
         return labels
 
     def _wireless_combo_labels(self) -> list[str]:
-        labels = [_AUTO_LABEL]
+        labels = [_AUTO_WIRELESS_LABEL]
         labels.extend(device.description for device in self._wireless_devices)
         labels.append(_MANUAL_LABEL)
         return labels
@@ -381,6 +386,11 @@ class SettingsDialog(Adw.Window):
 
     def _capture_group(self) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup(title="Capture Device")
+        group.set_description(
+            "HDMI capture and ADB are independent — video comes from the capture "
+            f"card while remote control uses ADB. See {_SEAMLESS_DOCS} for the "
+            "connection strategy."
+        )
         self._video_device = self._entry_row(
             "Video device",
             "Use auto or a V4L2 node such as /dev/video1",
@@ -661,9 +671,7 @@ class SettingsDialog(Adw.Window):
         adb = replace(
             self._config.adb,
             wired_serial=normalize_wired_serial(self._wired_serial_value()),
-            wireless_host=normalize_wireless_host(
-                wireless_host_raw, default=AdbConfig.wireless_host
-            ),
+            wireless_host=normalize_wireless_host(wireless_host_raw),
             wireless_port=port,
         )
         adb = normalize_adb_config(adb)

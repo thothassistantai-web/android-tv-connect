@@ -1,0 +1,1 @@
+Seamless UX Phase 1: neutral ADB defaults, clearer connection status chips, Refresh & connect, hot-plug toast, and mismatch banner when multiple devices are visible.

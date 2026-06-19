@@ -31,8 +31,6 @@ KEYCODE_APP_SWITCH = 187
 class AdbClient:
     """Manage wired/wireless ADB connections and inject Android TV input."""
 
-    DEFAULT_WIRED_SERIAL = "FUSA2541006925"
-    DEFAULT_WIRELESS_HOST = "192.168.1.157"
     DEFAULT_WIRELESS_PORT = 5555
 
     HEALTH_POLL_INTERVAL = 5.0
@@ -43,8 +41,8 @@ class AdbClient:
 
     def __init__(
         self,
-        wired_serial: str = DEFAULT_WIRED_SERIAL,
-        wireless_host: str = DEFAULT_WIRELESS_HOST,
+        wired_serial: str = "",
+        wireless_host: str = "",
         wireless_port: int = DEFAULT_WIRELESS_PORT,
         *,
         prefer_wired: bool = True,
@@ -146,6 +144,31 @@ class AdbClient:
         """Return True when the active session uses wireless ADB."""
         with self._lock:
             return self._is_wireless
+
+    def list_usb_serials(self) -> list[str]:
+        """Return serials of USB-attached devices in ``device`` state."""
+        from .adb_discovery import parse_adb_devices_l
+
+        result = self._run_adb(["devices", "-l"], check=False)
+        if result.returncode != 0:
+            return []
+        wired, _wireless = parse_adb_devices_l(result.stdout)
+        return [device.serial for device in wired]
+
+    def list_wireless_devices(self) -> list[str]:
+        """Return wireless ADB addresses currently visible."""
+        from .adb_discovery import parse_adb_devices_l
+
+        result = self._run_adb(["devices", "-l"], check=False)
+        if result.returncode != 0:
+            return []
+        _wired, wireless = parse_adb_devices_l(result.stdout)
+        return [device.address for device in wireless]
+
+    def refresh_connection(self) -> bool:
+        """Drop the current session and reconnect using configured preferences."""
+        self.disconnect()
+        return self.connect()
 
     def _set_connected(self, connected: bool) -> None:
         if self._connected == connected:

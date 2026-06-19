@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from .config import AdbConfig
+from .connection_ui import LEGACY_WIRED_SERIAL, LEGACY_WIRELESS_HOST
 
 _AUTO_VALUES = frozenset({"", "auto", "*"})
 _HOST_RE = re.compile(r"^[a-zA-Z0-9.\-:]+$")
@@ -18,12 +19,26 @@ def normalize_wired_serial(value: str) -> str:
     return stripped
 
 
-def normalize_wireless_host(value: str, *, default: str) -> str:
+def normalize_wireless_host(value: str) -> str:
     """Empty string means auto-discover the first available wireless ADB device."""
     stripped = value.strip()
     if stripped.lower() in _AUTO_VALUES:
         return ""
-    return stripped or default
+    return stripped
+
+
+def migrate_legacy_adb_defaults(adb: AdbConfig) -> AdbConfig:
+    """Convert shipped dev-host defaults to neutral auto mode without touching custom values."""
+    from dataclasses import replace
+
+    changes: dict[str, str] = {}
+    if adb.wired_serial.strip() == LEGACY_WIRED_SERIAL:
+        changes["wired_serial"] = ""
+    if adb.wireless_host.strip() == LEGACY_WIRELESS_HOST:
+        changes["wireless_host"] = ""
+    if changes:
+        adb = replace(adb, **changes)
+    return adb
 
 
 def wireless_host_is_auto(value: str) -> bool:
@@ -46,12 +61,11 @@ def parse_wireless_port(text: str, *, default: int = 5555) -> tuple[int | None, 
 def normalize_adb_config(adb: AdbConfig) -> AdbConfig:
     from dataclasses import replace
 
+    adb = migrate_legacy_adb_defaults(adb)
     return replace(
         adb,
         wired_serial=normalize_wired_serial(adb.wired_serial),
-        wireless_host=normalize_wireless_host(
-            adb.wireless_host, default=AdbConfig.wireless_host
-        ),
+        wireless_host=normalize_wireless_host(adb.wireless_host),
     )
 
 

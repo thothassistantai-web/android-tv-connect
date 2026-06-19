@@ -41,6 +41,7 @@ from .input_controller import (
     mode_hint,
 )
 from .shortcuts import bind_shortcuts, humanize_shortcut, key_event_matches
+from .scrcpy_manager import ScrcpySession, is_scrcpy_available, resolve_scrcpy_target
 from .settings_dialog import SettingsDialog
 from .settings_store import load_config, save_config
 
@@ -396,6 +397,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._mouse_mode = config.input.default_pointer_mode == "mouse"
         self._input_mode = InputMode.LOCAL
         self._settings_dialog: SettingsDialog | None = None
+        self._scrcpy = ScrcpySession(on_state_change=self._on_scrcpy_state_changed)
+        self._scrcpy_launch_pending = False
 
         self.set_title(APP_NAME)
         self.set_icon_name(ICON_NAME)
@@ -642,9 +645,72 @@ class MainWindow(Adw.ApplicationWindow):
             "mouse_mode_toggle": lambda: self.set_mouse_mode(not self._mouse_mode),
             "open_settings": self.open_settings,
             "control_bar_toggle": self.toggle_control_bar,
+            "mirror_toggle": self.toggle_mirror,
         }
         self._shortcut_ctrl = bind_shortcuts(self, self._config.shortcuts, actions)
         self._update_shortcut_tooltips()
+
+    def on_mirror_chip_clicked(self) -> None:
+        if self._scrcpy.is_running():
+            self.stop_mirror()
+            return
+        threading.Thread(target=self._mirror_launch_worker, daemon=True).start()
+
+    def toggle_mirror(self) -> None:
+        self.on_mirror_chip_clicked()
+
+    def stop_mirror(self) -> None:
+        self._scrcpy.stop()
+        self._update_status_dots()
+
+    def _mirror_launch_worker(self) -> None:
+        argv, error = resolve_scrcpy_target(self._config, self._adb)
+        if argv is None:
+            GLib.idle_add(self._on_mirror_launch_failed, error or "Unknown error")
+            return
+        ok, launch_error = self._scrcpy.launch(argv)
+        if not ok:
+            GLib.idle_add(self._on_mirror_launch_failed, launch_error or "Launch failed")
+            return
+        GLib.idle_add(self._on_mirror_launch_done)
+
+    def _on_mirror_launch_failed(self, message: str) -> bool:
+        self._scrcpy_launch_pending = False
+        self._update_status_dots()
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading="Screen mirror unavailable",
+            body=message,
+        )
+        dialog.add_response("ok", "OK")
+        dialog.present()
+        return False
+
+    def _on_mirror_launch_done(self) -> bool:
+        self._scrcpy_launch_pending = False
+        self._update_status_dots()
+        return False
+
+    def _on_scrcpy_state_changed(self, running: bool) -> None:
+        GLib.idle_add(self._on_scrcpy_state_idle, running)
+
+    def _on_scrcpy_state_idle(self, running: bool) -> bool:
+        self._update_status_dots()
+        if not running and self._scrcpy_launch_pending:
+            self._scrcpy_launch_pending = False
+        return False
+
+    def _maybe_auto_launch_scrcpy(self) -> None:
+        if not self._config.scrcpy.auto_launch_on_connect:
+            return
+        if self._scrcpy.is_running() or self._scrcpy_launch_pending:
+            return
+        if not is_scrcpy_available(self._config.scrcpy.scrcpy_path):
+            return
+        if not self._adb.is_connected():
+            return
+        self._scrcpy_launch_pending = True
+        threading.Thread(target=self._mirror_launch_worker, daemon=True).start()
 
     def on_adb_chip_clicked(self) -> None:
         if self._adb.is_connected():
@@ -680,8 +746,10 @@ class MainWindow(Adw.ApplicationWindow):
     def _update_status_dots(self) -> None:
         capture_playing = self._capture.state == "playing"
         adb_connected = self._adb.is_connected()
+        mirror_running = self._scrcpy.is_running()
         self._compact_header.set_dot(self._compact_header.capture_chip, capture_playing)
         self._compact_header.set_dot(self._compact_header.adb_chip, adb_connected)
+        self._compact_header.set_dot(self._compact_header.mirror_chip, mirror_running)
 
         if capture_playing:
             capture_tip = "Capture live — click to pause video"
@@ -705,8 +773,30 @@ class MainWindow(Adw.ApplicationWindow):
             adb_tip = "ADB offline — click to connect"
         self._compact_header.set_chip_tooltip(self._compact_header.adb_chip, adb_tip)
 
-    def _on_adb_connection_changed(self, _connected: bool) -> None:
+        if mirror_running:
+            transport = self._scrcpy.active_transport_label(self._adb)
+            mirror_tip = f"scrcpy running ({transport}) — click to stop"
+        elif is_scrcpy_available(self._config.scrcpy.scrcpy_path):
+            if adb_connected:
+                transport = self._scrcpy.active_transport_label(self._adb)
+                mirror_tip = f"Mirror screen via scrcpy ({transport} ADB) — click to start"
+            else:
+                mirror_tip = "Mirror (scrcpy) — connect ADB first"
+        else:
+            mirror_tip = "scrcpy not installed — sudo apt install scrcpy"
+        self._compact_header.set_chip_tooltip(
+            self._compact_header.mirror_chip,
+            mirror_tip,
+        )
+
+    def _on_adb_connection_changed(self, connected: bool) -> None:
         GLib.idle_add(self._refresh_status_dots)
+        if connected:
+            GLib.idle_add(self._maybe_auto_launch_scrcpy_idle)
+
+    def _maybe_auto_launch_scrcpy_idle(self) -> bool:
+        self._maybe_auto_launch_scrcpy()
+        return False
 
     def _refresh_status_dots(self) -> bool:
         self._update_status_dots()
@@ -773,6 +863,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_close_request(self, *_args) -> bool:
         self._persist_geometry()
+        self._scrcpy.stop()
         self._capture.stop()
         self._adb.disconnect()
         app = self.get_application()

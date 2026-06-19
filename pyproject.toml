@@ -1,6 +1,6 @@
 [project]
 name = "android-tv-connect"
-version = "1.1.0"
+version = "1.1.1"
 description = "Stream and control an Android TV stick over HDMI capture and ADB"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -22,11 +22,13 @@ class CompactHeader:
         left.set_margin_start(4)
         self._capture_chip = self._chip("Capture", self._on_capture_chip)
         self._adb_chip = self._chip("ADB", self._on_adb_chip)
+        self._mirror_chip = self._chip("Mirror", self._on_mirror_chip)
         self._mode_chip = Gtk.Label(label=MODE_LABELS[InputMode.LOCAL])
         self._mode_chip.add_css_class("caption")
         self._mode_chip.add_css_class("mode-chip")
         left.append(self._capture_chip)
         left.append(self._adb_chip)
+        left.append(self._mirror_chip)
         left.append(self._mode_chip)
         header.pack_start(left)
 
@@ -56,6 +58,10 @@ class CompactHeader:
     def _on_adb_chip(self, *_args) -> None:
         self._host.bump_chrome()
         self._host.on_adb_chip_clicked()
+
+    def _on_mirror_chip(self, *_args) -> None:
+        self._host.bump_chrome()
+        self._host.on_mirror_chip_clicked()
 
     def _on_pip(self, *_args) -> None:
         self._host.bump_chrome()
@@ -109,6 +115,10 @@ class CompactHeader:
     @property
     def adb_chip(self) -> Gtk.Button:
         return self._adb_chip
+
+    @property
+    def mirror_chip(self) -> Gtk.Button:
+        return self._mirror_chip
 
     @property
     def pip_button(self) -> Gtk.Button:

@@ -137,6 +137,16 @@ class AdbClient:
         """Return cached ADB connection state (updated by the health thread)."""
         return self._connected
 
+    def active_serial(self) -> Optional[str]:
+        """Return the serial or IP:port of the active ADB session."""
+        with self._lock:
+            return self._serial
+
+    def is_wireless_active(self) -> bool:
+        """Return True when the active session uses wireless ADB."""
+        with self._lock:
+            return self._is_wireless
+
     def _set_connected(self, connected: bool) -> None:
         if self._connected == connected:
             return

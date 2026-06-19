@@ -13,6 +13,7 @@ from .config import (
     AppConfig,
     CaptureConfig,
     InputConfig,
+    ScrcpyConfig,
     WindowConfig,
     default_config,
 )
@@ -70,6 +71,7 @@ def load_config() -> AppConfig:
     return AppConfig(
         adb=normalize_adb_config(_merge_dataclass(AdbConfig, raw.get("adb"))),
         capture=_merge_dataclass(CaptureConfig, raw.get("capture")),
+        scrcpy=_merge_dataclass(ScrcpyConfig, raw.get("scrcpy")),
         window=WindowConfig(
             last_mode=window_raw.get("last_mode", defaults.window.last_mode),
             remember_geometry=window_raw.get(
@@ -136,6 +138,7 @@ def save_config(config: AppConfig) -> None:
     payload = {
         "adb": asdict(config.adb),
         "capture": asdict(config.capture),
+        "scrcpy": asdict(config.scrcpy),
         "window": {
             "last_mode": config.window.last_mode,
             "remember_geometry": config.window.remember_geometry,

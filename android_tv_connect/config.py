@@ -79,6 +79,19 @@ class WindowConfig:
 
 
 @dataclass(frozen=True)
+class ScrcpyConfig:
+    auto_launch_on_connect: bool = False
+    scrcpy_path: str = ""
+    max_size: int = 1920
+    bit_rate: str = "8M"
+    fullscreen: bool = False
+    no_audio: bool = True
+    stay_awake: bool = True
+    turn_screen_off: bool = False
+    window_title: str = "Android TV Connect"
+
+
+@dataclass(frozen=True)
 class UpdateConfig:
     auto_check_on_launch: bool = True
     manifest_url_override: str = ""
@@ -103,6 +116,7 @@ class InputConfig:
 class AppConfig:
     adb: AdbConfig = field(default_factory=AdbConfig)
     capture: CaptureConfig = field(default_factory=CaptureConfig)
+    scrcpy: ScrcpyConfig = field(default_factory=ScrcpyConfig)
     window: WindowConfig = field(default_factory=WindowConfig)
     input: InputConfig = field(default_factory=InputConfig)
     shortcuts: ShortcutsConfig = field(default_factory=ShortcutsConfig)

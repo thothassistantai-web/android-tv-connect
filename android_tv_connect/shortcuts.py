@@ -27,6 +27,7 @@ SHORTCUT_DEFINITIONS: tuple[tuple[str, str, str], ...] = (
     ("mouse_mode_toggle", "Toggle mouse mode", "<Shift>F5"),
     ("open_settings", "Open settings", "<Shift>F6"),
     ("control_bar_toggle", "Toggle remote bar", "<Shift>F7"),
+    ("mirror_toggle", "Toggle scrcpy mirror", "<Shift>F8"),
 )
 
 # Bare function keys often handled by the OS/compositor.
@@ -42,6 +43,7 @@ class ShortcutsConfig:
     mouse_mode_toggle: str = "<Shift>F5"
     open_settings: str = "<Shift>F6"
     control_bar_toggle: str = "<Shift>F7"
+    mirror_toggle: str = "<Shift>F8"
 
     def get(self, action_id: str) -> str:
         return getattr(self, action_id)

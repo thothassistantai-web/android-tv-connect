@@ -25,7 +25,7 @@ from .adb_settings import (
     wireless_host_is_auto,
 )
 from .branding import APP_NAME, VERSION
-from .config import AdbConfig, AppConfig
+from .config import AdbConfig, AppConfig, ScrcpyConfig
 from .settings_store import save_config
 from .shortcuts import SHORTCUT_DEFINITIONS, SHORTCUT_HELP, validate_shortcut
 from .update_ui import check_for_updates
@@ -58,6 +58,7 @@ class SettingsDialog(Adw.Window):
 
         page = Adw.PreferencesPage()
         page.add(self._adb_group())
+        page.add(self._scrcpy_group())
         page.add(self._capture_group())
         page.add(self._input_group())
         page.add(self._shortcuts_group())
@@ -165,6 +166,80 @@ class SettingsDialog(Adw.Window):
         group.add(self._prefer_wired)
 
         self._refresh_adb_devices(initial=True)
+        return group
+
+    def _scrcpy_group(self) -> Adw.PreferencesGroup:
+        group = Adw.PreferencesGroup(title="Screen mirror (scrcpy)")
+        group.set_description(
+            "Optional ADB screen mirror window. Uses the same wired or wireless "
+            "ADB target as remote control."
+        )
+
+        self._scrcpy_auto = self._switch_row(
+            "Auto-launch on ADB connect",
+            "Open scrcpy when a device connects (off by default)",
+            self._config.scrcpy.auto_launch_on_connect,
+        )
+        group.add(self._scrcpy_auto)
+
+        self._scrcpy_path = self._entry_row(
+            "scrcpy path",
+            "Leave empty to use scrcpy from PATH",
+            self._config.scrcpy.scrcpy_path,
+        )
+        group.add(self._scrcpy_path)
+
+        self._scrcpy_max_size = self._spin_row(
+            "Max size (px)",
+            float(self._config.scrcpy.max_size),
+            160,
+            0,
+            3840,
+        )
+        group.add(self._scrcpy_max_size)
+
+        self._scrcpy_bit_rate = self._entry_row(
+            "Video bit rate",
+            "scrcpy --video-bit-rate value, e.g. 8M or 2M",
+            self._config.scrcpy.bit_rate,
+        )
+        group.add(self._scrcpy_bit_rate)
+
+        self._scrcpy_title = self._entry_row(
+            "Window title",
+            "Title for the scrcpy window",
+            self._config.scrcpy.window_title,
+        )
+        group.add(self._scrcpy_title)
+
+        self._scrcpy_fullscreen = self._switch_row(
+            "Start fullscreen",
+            "Launch scrcpy in fullscreen mode",
+            self._config.scrcpy.fullscreen,
+        )
+        group.add(self._scrcpy_fullscreen)
+
+        self._scrcpy_no_audio = self._switch_row(
+            "No audio",
+            "Disable audio forwarding (recommended for TV sticks)",
+            self._config.scrcpy.no_audio,
+        )
+        group.add(self._scrcpy_no_audio)
+
+        self._scrcpy_stay_awake = self._switch_row(
+            "Stay awake",
+            "Keep the device awake while mirroring",
+            self._config.scrcpy.stay_awake,
+        )
+        group.add(self._scrcpy_stay_awake)
+
+        self._scrcpy_turn_off = self._switch_row(
+            "Turn screen off",
+            "Turn device screen off while mirroring (may not work on all TVs)",
+            self._config.scrcpy.turn_screen_off,
+        )
+        group.add(self._scrcpy_turn_off)
+
         return group
 
     def _wired_combo_labels(self) -> list[str]:
@@ -600,6 +675,18 @@ class SettingsDialog(Adw.Window):
             height=int(self._height.get_value()),
             framerate=int(self._fps.get_value()),
         )
+        scrcpy = replace(
+            self._config.scrcpy,
+            auto_launch_on_connect=self._scrcpy_auto.get_active(),
+            scrcpy_path=self._scrcpy_path.get_text().strip(),
+            max_size=int(self._scrcpy_max_size.get_value()),
+            bit_rate=self._scrcpy_bit_rate.get_text().strip() or ScrcpyConfig.bit_rate,
+            fullscreen=self._scrcpy_fullscreen.get_active(),
+            no_audio=self._scrcpy_no_audio.get_active(),
+            stay_awake=self._scrcpy_stay_awake.get_active(),
+            turn_screen_off=self._scrcpy_turn_off.get_active(),
+            window_title=self._scrcpy_title.get_text().strip() or ScrcpyConfig.window_title,
+        )
         input_cfg = replace(
             self._config.input,
             prefer_wired_adb=self._prefer_wired.get_active(),
@@ -628,6 +715,7 @@ class SettingsDialog(Adw.Window):
             self._config,
             adb=adb,
             capture=capture,
+            scrcpy=scrcpy,
             input=input_cfg,
             shortcuts=shortcuts,
             window=window,

@@ -6,21 +6,28 @@ import re
 
 from .config import AdbConfig
 
-_AUTO_SERIAL_VALUES = frozenset({"", "auto", "*"})
+_AUTO_VALUES = frozenset({"", "auto", "*"})
 _HOST_RE = re.compile(r"^[a-zA-Z0-9.\-:]+$")
 
 
 def normalize_wired_serial(value: str) -> str:
     """Empty string means auto-discover the first available USB ADB device."""
     stripped = value.strip()
-    if stripped.lower() in _AUTO_SERIAL_VALUES:
+    if stripped.lower() in _AUTO_VALUES:
         return ""
     return stripped
 
 
 def normalize_wireless_host(value: str, *, default: str) -> str:
+    """Empty string means auto-discover the first available wireless ADB device."""
     stripped = value.strip()
+    if stripped.lower() in _AUTO_VALUES:
+        return ""
     return stripped or default
+
+
+def wireless_host_is_auto(value: str) -> bool:
+    return not value.strip() or value.strip().lower() in _AUTO_VALUES
 
 
 def parse_wireless_port(text: str, *, default: int = 5555) -> tuple[int | None, str | None]:

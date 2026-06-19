@@ -105,11 +105,8 @@ class AdbClient:
                         is_wireless = False
                         break
                 else:
-                    result = self._run_adb(
-                        ["connect", self._wireless_address], check=False
-                    )
-                    if result.returncode == 0:
-                        serial = self._wireless_address
+                    serial = self._find_wireless_serial()
+                    if serial:
                         is_wireless = True
                         break
 
@@ -208,6 +205,32 @@ class AdbClient:
         if auto_discover:
             return usb_pick or any_pick
         return specific_fallback
+
+    def _find_wireless_serial(self) -> Optional[str]:
+        from .adb_discovery import parse_adb_devices_l
+
+        result = self._run_adb(["devices", "-l"], check=False)
+        if result.returncode == 0:
+            _wired, wireless = parse_adb_devices_l(result.stdout)
+            if wireless:
+                if not self._wireless_host:
+                    return wireless[0].address
+                for option in wireless:
+                    if option.host == self._wireless_host:
+                        if option.port == self._wireless_port:
+                            return option.address
+                        return f"{self._wireless_host}:{self._wireless_port}"
+
+        if not self._wireless_host:
+            return None
+
+        connect_result = self._run_adb(["connect", self._wireless_address], check=False)
+        if connect_result.returncode != 0:
+            return None
+        combined = f"{connect_result.stdout}\n{connect_result.stderr}".lower()
+        if "connected to" not in combined and "already connected" not in combined:
+            return None
+        return self._wireless_address
 
     def _notify_connection_change(self, connected: bool) -> None:
         if connected == self._last_notified_connected:
@@ -329,9 +352,8 @@ class AdbClient:
                     is_wireless = False
                     break
             else:
-                result = self._run_adb(["connect", self._wireless_address], check=False)
-                if result.returncode == 0:
-                    serial = self._wireless_address
+                serial = self._find_wireless_serial()
+                if serial:
                     is_wireless = True
                     break
 

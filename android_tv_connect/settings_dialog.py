@@ -2,24 +2,35 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import replace
 
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gtk
+gi.require_version("GLib", "2.0")
+from gi.repository import Adw, GLib, Gtk
 
+from .adb_discovery import (
+    WiredDeviceOption,
+    WirelessDeviceOption,
+    discover_adb_devices,
+)
 from .adb_settings import (
     normalize_adb_config,
     normalize_wired_serial,
     normalize_wireless_host,
     parse_wireless_port,
+    wireless_host_is_auto,
 )
 from .branding import APP_NAME, VERSION
 from .config import AdbConfig, AppConfig
 from .settings_store import save_config
 from .shortcuts import SHORTCUT_DEFINITIONS, SHORTCUT_HELP, validate_shortcut
+
+_AUTO_LABEL = "Auto (first available)"
+_MANUAL_LABEL = "Manual…"
 
 
 class SettingsDialog(Adw.Window):
@@ -92,27 +103,195 @@ class SettingsDialog(Adw.Window):
 
     def _adb_group(self) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup(title="ADB Connection")
-        self._wired_serial = self._entry_row(
-            "Wired serial",
-            "USB serial, or auto to use the first connected device",
-            self._config.adb.wired_serial or "auto",
+        group.set_description(
+            "Pick a discovered device or choose Manual for a custom serial or IP."
         )
-        self._wireless_host = self._entry_row(
-            "Wireless host", "Fallback IP when USB unavailable", self._config.adb.wireless_host
+
+        self._wired_devices: list[WiredDeviceOption] = []
+        self._wireless_devices: list[WirelessDeviceOption] = []
+
+        self._wired_combo = Adw.ComboRow(title="Wired device")
+        self._wired_combo.connect("notify::selected", self._on_wired_selection_changed)
+        group.add(self._wired_combo)
+
+        self._wired_manual = self._entry_row(
+            "Wired serial (manual)",
+            "USB serial from adb devices -l",
+            self._config.adb.wired_serial or "",
         )
+        self._wired_manual.set_visible(False)
+        group.add(self._wired_manual)
+
+        self._wireless_combo = Adw.ComboRow(title="Wireless device")
+        self._wireless_combo.connect("notify::selected", self._on_wireless_selection_changed)
+        group.add(self._wireless_combo)
+
+        self._wireless_manual = self._entry_row(
+            "Wireless host (manual)",
+            "IP or hostname when USB is unavailable",
+            self._config.adb.wireless_host,
+        )
+        self._wireless_manual.set_visible(False)
+        group.add(self._wireless_manual)
+
         self._wireless_port = self._entry_row(
             "Wireless port", "TCP port for network ADB", str(self._config.adb.wireless_port)
         )
+        group.add(self._wireless_port)
+
+        refresh_row = Adw.ActionRow(title="Refresh devices")
+        refresh_row.set_subtitle("Re-scan adb devices and the local network")
+        self._refresh_button = Gtk.Button(label="Refresh")
+        self._refresh_button.connect("clicked", self._on_refresh_devices)
+        refresh_row.add_suffix(self._refresh_button)
+        group.add(refresh_row)
+
         self._prefer_wired = self._switch_row(
             "Prefer wired ADB",
             "Use USB debugging before attempting wireless connect",
             self._config.input.prefer_wired_adb,
         )
-        group.add(self._wired_serial)
-        group.add(self._wireless_host)
-        group.add(self._wireless_port)
         group.add(self._prefer_wired)
+
+        self._refresh_adb_devices(initial=True)
         return group
+
+    def _wired_combo_labels(self) -> list[str]:
+        labels = [_AUTO_LABEL]
+        labels.extend(device.description for device in self._wired_devices)
+        labels.append(_MANUAL_LABEL)
+        return labels
+
+    def _wireless_combo_labels(self) -> list[str]:
+        labels = [_AUTO_LABEL]
+        labels.extend(device.description for device in self._wireless_devices)
+        labels.append(_MANUAL_LABEL)
+        return labels
+
+    def _set_combo_model(self, combo: Adw.ComboRow, labels: list[str]) -> None:
+        combo.set_model(Gtk.StringList.new(labels))
+
+    def _wired_manual_index(self) -> int:
+        return len(self._wired_devices) + 1
+
+    def _wireless_manual_index(self) -> int:
+        return len(self._wireless_devices) + 1
+
+    def _select_wired_from_config(self) -> None:
+        serial = self._config.adb.wired_serial
+        if not serial:
+            self._wired_combo.set_selected(0)
+            self._wired_manual.set_visible(False)
+            return
+
+        for index, device in enumerate(self._wired_devices, start=1):
+            if device.serial == serial:
+                self._wired_combo.set_selected(index)
+                self._wired_manual.set_visible(False)
+                return
+
+        self._wired_combo.set_selected(self._wired_manual_index())
+        self._wired_manual.set_text(serial)
+        self._wired_manual.set_visible(True)
+
+    def _select_wireless_from_config(self) -> None:
+        host = self._config.adb.wireless_host
+        port = self._config.adb.wireless_port
+        if wireless_host_is_auto(host):
+            self._wireless_combo.set_selected(0)
+            self._wireless_manual.set_visible(False)
+            return
+
+        for index, device in enumerate(self._wireless_devices, start=1):
+            if device.host == host and device.port == port:
+                self._wireless_combo.set_selected(index)
+                self._wireless_manual.set_visible(False)
+                self._wireless_port.set_text(str(device.port))
+                return
+
+        self._wireless_combo.set_selected(self._wireless_manual_index())
+        self._wireless_manual.set_text(host)
+        self._wireless_manual.set_visible(True)
+
+    def _on_wired_selection_changed(self, *_args) -> None:
+        manual = self._wired_combo.get_selected() == self._wired_manual_index()
+        self._wired_manual.set_visible(manual)
+
+    def _on_wireless_selection_changed(self, *_args) -> None:
+        selected = self._wireless_combo.get_selected()
+        manual = selected == self._wireless_manual_index()
+        self._wireless_manual.set_visible(manual)
+        if manual or selected <= 0:
+            return
+        device = self._wireless_devices[selected - 1]
+        self._wireless_port.set_text(str(device.port))
+
+    def _current_wireless_port(self) -> int:
+        port, _err = parse_wireless_port(self._wireless_port.get_text())
+        return port or AdbConfig.wireless_port
+
+    def _refresh_adb_devices(self, *, initial: bool = False) -> None:
+        if not initial:
+            self._refresh_button.set_sensitive(False)
+            self._refresh_button.set_label("Scanning…")
+
+        port = self._current_wireless_port() if not initial else self._config.adb.wireless_port
+
+        def work() -> None:
+            try:
+                wired, wireless = discover_adb_devices(
+                    scan_subnet=not initial,
+                    wireless_port=port,
+                )
+            except Exception:
+                wired, wireless = [], []
+            GLib.idle_add(self._apply_discovered_devices, wired, wireless, initial)
+
+        if initial:
+            try:
+                wired, wireless = discover_adb_devices(scan_subnet=False, wireless_port=port)
+            except Exception:
+                wired, wireless = [], []
+            self._apply_discovered_devices(wired, wireless, True)
+            return
+
+        threading.Thread(target=work, daemon=True, name="adb-device-scan").start()
+
+    def _apply_discovered_devices(
+        self,
+        wired: list[WiredDeviceOption],
+        wireless: list[WirelessDeviceOption],
+        initial: bool,
+    ) -> bool:
+        self._wired_devices = wired
+        self._wireless_devices = wireless
+        self._set_combo_model(self._wired_combo, self._wired_combo_labels())
+        self._set_combo_model(self._wireless_combo, self._wireless_combo_labels())
+        self._select_wired_from_config()
+        self._select_wireless_from_config()
+        if not initial:
+            self._refresh_button.set_sensitive(True)
+            self._refresh_button.set_label("Refresh")
+        return False
+
+    def _on_refresh_devices(self, *_args) -> None:
+        self._refresh_adb_devices(initial=False)
+
+    def _wired_serial_value(self) -> str:
+        selected = self._wired_combo.get_selected()
+        if selected <= 0:
+            return ""
+        if selected == self._wired_manual_index():
+            return self._wired_manual.get_text().strip()
+        return self._wired_devices[selected - 1].serial
+
+    def _wireless_host_value(self) -> str:
+        selected = self._wireless_combo.get_selected()
+        if selected <= 0:
+            return ""
+        if selected == self._wireless_manual_index():
+            return self._wireless_manual.get_text().strip()
+        return self._wireless_devices[selected - 1].host
 
     def _capture_group(self) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup(title="Capture Device")
@@ -272,7 +451,7 @@ class SettingsDialog(Adw.Window):
 
         shortcuts = replace(self._config.shortcuts, **shortcuts_kwargs)
 
-        wireless_host_raw = self._wireless_host.get_text().strip()
+        wireless_host_raw = self._wireless_host_value()
         port, port_err = parse_wireless_port(self._wireless_port.get_text())
         if port_err:
             self._show_error("Invalid wireless port", port_err)
@@ -280,7 +459,7 @@ class SettingsDialog(Adw.Window):
 
         adb = replace(
             self._config.adb,
-            wired_serial=normalize_wired_serial(self._wired_serial.get_text()),
+            wired_serial=normalize_wired_serial(self._wired_serial_value()),
             wireless_host=normalize_wireless_host(
                 wireless_host_raw, default=AdbConfig.wireless_host
             ),

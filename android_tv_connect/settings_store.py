@@ -16,7 +16,7 @@ from .config import (
     WindowConfig,
     default_config,
 )
-from .shortcuts import migrate_shortcuts
+from .adb_settings import normalize_adb_config
 
 SETTINGS_PATH = CONFIG_DIR / "config.json"
 
@@ -67,7 +67,7 @@ def load_config() -> AppConfig:
             )
 
     return AppConfig(
-        adb=_merge_dataclass(AdbConfig, raw.get("adb")),
+        adb=normalize_adb_config(_merge_dataclass(AdbConfig, raw.get("adb"))),
         capture=_merge_dataclass(CaptureConfig, raw.get("capture")),
         window=WindowConfig(
             last_mode=window_raw.get("last_mode", defaults.window.last_mode),

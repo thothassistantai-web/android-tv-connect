@@ -27,6 +27,7 @@ def _adb_ready(config) -> bool:
         wired_serial=config.adb.wired_serial,
         wireless_host=config.adb.wireless_host,
         wireless_port=config.adb.wireless_port,
+        prefer_wired=config.input.prefer_wired_adb,
     )
     if client.connect():
         client.disconnect()

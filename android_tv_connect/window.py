@@ -404,6 +404,7 @@ class MainWindow(Adw.ApplicationWindow):
             wired_serial=self._config.adb.wired_serial,
             wireless_host=self._config.adb.wireless_host,
             wireless_port=self._config.adb.wireless_port,
+            prefer_wired=self._config.input.prefer_wired_adb,
             on_connection_change=self._on_adb_connection_changed,
         )
 
@@ -595,6 +596,12 @@ class MainWindow(Adw.ApplicationWindow):
     def _on_settings_saved(self, config: AppConfig) -> None:
         self._config = config
         save_config(config)
+        self._adb.update_settings(
+            wired_serial=config.adb.wired_serial,
+            wireless_host=config.adb.wireless_host,
+            wireless_port=config.adb.wireless_port,
+            prefer_wired=config.input.prefer_wired_adb,
+        )
         self._chrome.set_enabled(config.window.chrome_auto_hide)
         self._chrome.set_delay_ms(config.window.chrome_hide_delay_ms)
         if config.window.control_bar_collapsed:
@@ -951,6 +958,11 @@ class AndroidTvApp(Adw.Application):
     def _on_window_destroy(self, *_args) -> None:
         self._window = None
 
+    def _on_quit_requested(self, *_args) -> None:
+        if self._window is not None and self._window._settings_dialog is not None:
+            self._window._settings_dialog.close()
+        self.quit()
+
     def _on_activate(self, _app: Adw.Application) -> None:
         if self._window is not None:
             self._window.present()
@@ -969,9 +981,9 @@ class AndroidTvApp(Adw.Application):
         Adw.Application.do_startup(self)
 
         quit_action = Gio.SimpleAction.new("quit", None)
-        quit_action.connect("activate", lambda *_: self.quit())
+        quit_action.connect("activate", self._on_quit_requested)
         self.add_action(quit_action)
-        self.set_accels_for_action("app.quit", ["<Control>q"])
+        self.set_accels_for_action("app.quit", ["<Control>q", "<Primary>q"])
 
         about_action = Gio.SimpleAction.new("about", None)
         about_action.connect(

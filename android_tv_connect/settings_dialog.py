@@ -10,8 +10,14 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk
 
+from .adb_settings import (
+    normalize_adb_config,
+    normalize_wired_serial,
+    normalize_wireless_host,
+    parse_wireless_port,
+)
 from .branding import APP_NAME, VERSION
-from .config import AppConfig
+from .config import AdbConfig, AppConfig
 from .settings_store import save_config
 from .shortcuts import SHORTCUT_DEFINITIONS, SHORTCUT_HELP, validate_shortcut
 
@@ -29,6 +35,9 @@ class SettingsDialog(Adw.Window):
         header.set_title_widget(
             Adw.WindowTitle(title="Settings", subtitle="Android TV Connect")
         )
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", self._on_cancel)
+        header.pack_start(cancel)
         done = Gtk.Button(label="Save")
         done.add_css_class("suggested-action")
         done.connect("clicked", self._on_save)
@@ -49,6 +58,22 @@ class SettingsDialog(Adw.Window):
         scrolled.set_child(page)
         toolbar.set_content(scrolled)
         self.set_content(toolbar)
+        self.connect("close-request", self._on_close_request)
+
+    def _on_close_request(self, *_args) -> bool:
+        return False
+
+    def _on_cancel(self, *_args) -> None:
+        self.close()
+
+    def _show_error(self, heading: str, body: str) -> None:
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading=heading,
+            body=body,
+        )
+        dialog.add_response("ok", "OK")
+        dialog.present()
 
     def _entry_row(self, title: str, subtitle: str, value: str) -> Adw.EntryRow:
         row = Adw.EntryRow(title=title)
@@ -68,7 +93,9 @@ class SettingsDialog(Adw.Window):
     def _adb_group(self) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup(title="ADB Connection")
         self._wired_serial = self._entry_row(
-            "Wired serial", "USB device serial (preferred)", self._config.adb.wired_serial
+            "Wired serial",
+            "USB serial, or auto to use the first connected device",
+            self._config.adb.wired_serial or "auto",
         )
         self._wireless_host = self._entry_row(
             "Wireless host", "Fallback IP when USB unavailable", self._config.adb.wireless_host
@@ -239,24 +266,27 @@ class SettingsDialog(Adw.Window):
             value = self._shortcut_rows[action_id].get_text().strip()
             ok, err = validate_shortcut(value)
             if not ok:
-                dialog = Adw.MessageDialog(
-                    transient_for=self,
-                    heading="Invalid shortcut",
-                    body=f"{_label}: {err}",
-                )
-                dialog.add_response("ok", "OK")
-                dialog.present()
+                self._show_error("Invalid shortcut", f"{_label}: {err}")
                 return
             shortcuts_kwargs[action_id] = value
 
         shortcuts = replace(self._config.shortcuts, **shortcuts_kwargs)
 
+        wireless_host_raw = self._wireless_host.get_text().strip()
+        port, port_err = parse_wireless_port(self._wireless_port.get_text())
+        if port_err:
+            self._show_error("Invalid wireless port", port_err)
+            return
+
         adb = replace(
             self._config.adb,
-            wired_serial=self._wired_serial.get_text().strip(),
-            wireless_host=self._wireless_host.get_text().strip(),
-            wireless_port=int(self._wireless_port.get_text().strip() or "5555"),
+            wired_serial=normalize_wired_serial(self._wired_serial.get_text()),
+            wireless_host=normalize_wireless_host(
+                wireless_host_raw, default=AdbConfig.wireless_host
+            ),
+            wireless_port=port,
         )
+        adb = normalize_adb_config(adb)
         capture = replace(
             self._config.capture,
             video_device=self._video_device.get_text().strip(),

@@ -47,9 +47,13 @@ class AdbClient:
         wireless_host: str = DEFAULT_WIRELESS_HOST,
         wireless_port: int = DEFAULT_WIRELESS_PORT,
         *,
+        prefer_wired: bool = True,
         on_connection_change=None,
     ) -> None:
         self._wired_serial = wired_serial
+        self._prefer_wired = prefer_wired
+        self._wireless_host = wireless_host
+        self._wireless_port = wireless_port
         self._wireless_address = f"{wireless_host}:{wireless_port}"
         self._serial: Optional[str] = None
         self._is_wireless = False
@@ -62,31 +66,61 @@ class AdbClient:
         self._last_notified_connected = False
         self._connected = False
 
+    def update_settings(
+        self,
+        *,
+        wired_serial: str,
+        wireless_host: str,
+        wireless_port: int,
+        prefer_wired: bool,
+    ) -> None:
+        """Apply new connection settings; reconnect if values changed."""
+        with self._lock:
+            changed = (
+                wired_serial != self._wired_serial
+                or wireless_host != self._wireless_host
+                or wireless_port != self._wireless_port
+                or prefer_wired != self._prefer_wired
+            )
+            self._wired_serial = wired_serial
+            self._wireless_host = wireless_host
+            self._wireless_port = wireless_port
+            self._prefer_wired = prefer_wired
+            self._wireless_address = f"{wireless_host}:{wireless_port}"
+        if changed:
+            self.disconnect()
+            self.connect()
+
     def connect(self) -> bool:
-        """Start ADB server and connect via USB, falling back to wireless."""
+        """Start ADB server and connect using the configured preference order."""
         with self._lock:
             self._run_adb(["start-server"], check=False)
+            order = ("wired", "wireless") if self._prefer_wired else ("wireless", "wired")
+            serial: Optional[str] = None
+            is_wireless = False
+            for kind in order:
+                if kind == "wired":
+                    serial = self._find_wired_serial()
+                    if serial:
+                        is_wireless = False
+                        break
+                else:
+                    result = self._run_adb(
+                        ["connect", self._wireless_address], check=False
+                    )
+                    if result.returncode == 0:
+                        serial = self._wireless_address
+                        is_wireless = True
+                        break
 
-            serial = self._find_wired_serial()
-            if serial:
-                self._serial = serial
-                self._is_wireless = False
-            else:
-                result = self._run_adb(["connect", self._wireless_address], check=False)
-                if result.returncode != 0:
-                    self._serial = None
-                    self._is_wireless = False
-                    self._stop_health_poll()
-                    return False
-                self._serial = self._wireless_address
-                self._is_wireless = True
-
-            if not self._device_ready(self._serial):
+            if not serial or not self._device_ready(serial):
                 self._serial = None
                 self._is_wireless = False
                 self._stop_health_poll()
                 return False
 
+            self._serial = serial
+            self._is_wireless = is_wireless
             self._reconnect_delay = self._RECONNECT_BASE_DELAY
             self._start_health_poll()
             self._set_connected(True)
@@ -147,7 +181,10 @@ class AdbClient:
         if result.returncode != 0:
             return None
 
-        fallback: Optional[str] = None
+        auto_discover = not self._wired_serial
+        usb_pick: Optional[str] = None
+        any_pick: Optional[str] = None
+        specific_fallback: Optional[str] = None
         for line in result.stdout.splitlines():
             line = line.strip()
             if not line or line.startswith("List of devices"):
@@ -156,12 +193,21 @@ class AdbClient:
             if len(parts) < 2:
                 continue
             serial, state = parts[0], parts[1]
-            if serial != self._wired_serial or state != "device":
+            if state != "device":
+                continue
+            if not auto_discover and serial != self._wired_serial:
                 continue
             if "usb:" in line:
-                return serial
-            fallback = serial
-        return fallback
+                if not auto_discover:
+                    return serial
+                usb_pick = usb_pick or serial
+            elif auto_discover:
+                any_pick = any_pick or serial
+            else:
+                specific_fallback = serial
+        if auto_discover:
+            return usb_pick or any_pick
+        return specific_fallback
 
     def _notify_connection_change(self, connected: bool) -> None:
         if connected == self._last_notified_connected:
@@ -273,17 +319,21 @@ class AdbClient:
     def _attempt_reconnect(self) -> bool:
         self._run_adb(["start-server"], check=False)
 
-        serial = self._find_wired_serial()
+        order = ("wired", "wireless") if self._prefer_wired else ("wireless", "wired")
+        serial: Optional[str] = None
         is_wireless = False
-        if not serial:
-            result = self._run_adb(["connect", self._wireless_address], check=False)
-            if result.returncode != 0:
-                with self._lock:
-                    self._serial = None
-                    self._is_wireless = False
-                return False
-            serial = self._wireless_address
-            is_wireless = True
+        for kind in order:
+            if kind == "wired":
+                serial = self._find_wired_serial()
+                if serial:
+                    is_wireless = False
+                    break
+            else:
+                result = self._run_adb(["connect", self._wireless_address], check=False)
+                if result.returncode == 0:
+                    serial = self._wireless_address
+                    is_wireless = True
+                    break
 
         if not serial or not self._device_ready(serial):
             with self._lock:

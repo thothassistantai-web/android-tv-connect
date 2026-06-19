@@ -10,7 +10,7 @@ import subprocess
 import sys
 
 from . import LAUNCHER_VERSION
-from .paths import app_pythonpath, read_installed_version, resolve_current_root
+from .paths import app_pythonpath, current_link, read_installed_version, resolve_current_root
 from .settings import load_launcher_settings
 from .updater import apply_update, check_for_update, should_prompt
 
@@ -28,9 +28,7 @@ def _build_app_env() -> dict[str, str]:
 def _spawn_app(argv: list[str]) -> int:
     root = resolve_current_root()
     if root is None:
-        LOG.error(
-            "No installed app bundle found under ~/.local/share/android-tv-connect/current"
-        )
+        LOG.error("No installed app bundle found under %s", current_link())
         return 1
 
     cmd = [sys.executable, "-m", "android_tv_connect", *argv]

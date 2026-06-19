@@ -30,7 +30,7 @@ def check_for_update(
     url = manifest_url or cfg.update_manifest_url
 
     try:
-        manifest = fetch_update_manifest(url)
+        manifest = fetch_update_manifest(url, github_token=cfg.github_token)
     except ManifestFetchError as exc:
         return UpdateCheckResult(
             installed=installed,

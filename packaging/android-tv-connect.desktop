@@ -1,13 +1,14 @@
 [Desktop Entry]
+Version=1.0
 Type=Application
 Name=Android TV Connect
 GenericName=Android TV Remote
 Comment=Stream and control an Android TV stick over HDMI capture and ADB
 Exec=atv-connect
+TryExec=atv-connect
 Icon=android-tv-connect
 Terminal=false
-Categories=AudioVideo;Player;Utility;
+Categories=AudioVideo;
 StartupWMClass=com.androidtvconnect.App
 Keywords=android;tv;adb;capture;remote;hdmi;streaming;
-Version=1.1.0
 MimeType=

@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import urllib.error
 import urllib.request
 from typing import Any
 
-from .constants import DEFAULT_UPDATE_MANIFEST_URL, MANIFEST_ASSET_NAME, USER_AGENT
+from .constants import (
+    DEFAULT_GITHUB_RAW_MANIFEST_URL,
+    DEFAULT_UPDATE_MANIFEST_URL,
+    MANIFEST_ASSET_NAME,
+    USER_AGENT,
+)
 from .version import (
     UpdateManifest,
     parse_version_code_from_body,
@@ -19,31 +25,84 @@ _GITHUB_RELEASES_RE = re.compile(
     r"https?://api\.github\.com/repos/[^/]+/[^/]+/releases",
     re.IGNORECASE,
 )
+_GITHUB_RELEASES_API_RE = re.compile(
+    r"^https?://api\.github\.com/repos/(?P<owner>[^/]+)/(?P<repo>[^/]+)/releases(?:/latest|/tags/(?P<tag>[^/?#]+))?\s*$",
+    re.IGNORECASE,
+)
 
 
 class ManifestFetchError(RuntimeError):
     pass
 
 
-def _request_text(url: str, *, accept: str = "application/json") -> str:
+def resolve_github_token(explicit: str | None = None) -> str:
+    token = (explicit or "").strip()
+    if token:
+        return token
+    return os.environ.get("GITHUB_TOKEN", "").strip()
+
+
+def _build_request_headers(*, accept: str, github_token: str = "") -> dict[str, str]:
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": accept,
+    }
+    if github_token:
+        headers["Authorization"] = f"Bearer {github_token}"
+    return headers
+
+
+def _request_text(
+    url: str,
+    *,
+    accept: str = "application/json",
+    github_token: str = "",
+) -> str:
     request = urllib.request.Request(
         url,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": accept,
-        },
+        headers=_build_request_headers(accept=accept, github_token=github_token),
     )
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             return response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        raise ManifestFetchError(f"HTTP {exc.code} for {url}") from exc
+        detail = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+            payload = json.loads(body)
+            if isinstance(payload, dict):
+                message = str(payload.get("message", "")).strip()
+                if message:
+                    detail = f": {message}"
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+        raise ManifestFetchError(f"HTTP {exc.code} for {url}{detail}") from exc
     except urllib.error.URLError as exc:
         raise ManifestFetchError(f"Network error for {url}: {exc.reason}") from exc
 
 
 def is_github_releases_url(url: str) -> bool:
     return bool(_GITHUB_RELEASES_RE.search(url.strip()))
+
+
+def github_raw_manifest_fallback_url(url: str) -> str | None:
+    """Map a GitHub Releases API URL to a static update-manifest.json download URL."""
+    match = _GITHUB_RELEASES_API_RE.match(url.strip())
+    if match is None:
+        return None
+
+    owner = match.group("owner")
+    repo = match.group("repo")
+    tag = match.group("tag")
+    if tag:
+        return (
+            f"https://github.com/{owner}/{repo}/releases/download/"
+            f"{tag}/{MANIFEST_ASSET_NAME}"
+        )
+    return (
+        f"https://github.com/{owner}/{repo}/releases/latest/download/"
+        f"{MANIFEST_ASSET_NAME}"
+    )
 
 
 def _coerce_manifest(raw: dict[str, Any]) -> UpdateManifest | None:
@@ -100,7 +159,7 @@ def parse_manifest_json(text: str) -> UpdateManifest | None:
     return _coerce_manifest(raw)
 
 
-def parse_github_release(text: str) -> UpdateManifest | None:
+def parse_github_release(text: str, *, github_token: str = "") -> UpdateManifest | None:
     try:
         release = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -118,7 +177,11 @@ def parse_github_release(text: str) -> UpdateManifest | None:
     if manifest_asset is not None:
         manifest_url = str(manifest_asset.get("browser_download_url", "")).strip()
         if manifest_url:
-            manifest_text = _request_text(manifest_url, accept="application/json")
+            manifest_text = _request_text(
+                manifest_url,
+                accept="application/json",
+                github_token=github_token,
+            )
             parsed = parse_manifest_json(manifest_text)
             if parsed is not None:
                 return parsed
@@ -155,17 +218,45 @@ def parse_github_release(text: str) -> UpdateManifest | None:
     )
 
 
-def fetch_update_manifest(url: str | None = None) -> UpdateManifest:
-    manifest_url = (url or DEFAULT_UPDATE_MANIFEST_URL).strip()
-    if not manifest_url:
-        raise ManifestFetchError("Update manifest URL is empty")
-
-    text = _request_text(manifest_url)
-    if is_github_releases_url(manifest_url):
-        manifest = parse_github_release(text)
+def _fetch_manifest_from_url(url: str, *, github_token: str = "") -> UpdateManifest:
+    text = _request_text(url, github_token=github_token)
+    if is_github_releases_url(url):
+        manifest = parse_github_release(text, github_token=github_token)
     else:
         manifest = parse_manifest_json(text)
 
     if manifest is None:
         raise ManifestFetchError("Could not parse update manifest")
     return manifest
+
+
+def fetch_update_manifest(
+    url: str | None = None,
+    *,
+    github_token: str | None = None,
+) -> UpdateManifest:
+    manifest_url = (url or DEFAULT_UPDATE_MANIFEST_URL).strip()
+    if not manifest_url:
+        raise ManifestFetchError("Update manifest URL is empty")
+
+    token = resolve_github_token(github_token)
+
+    try:
+        return _fetch_manifest_from_url(manifest_url, github_token=token)
+    except ManifestFetchError as primary_exc:
+        fallback_url = github_raw_manifest_fallback_url(manifest_url)
+        if fallback_url is None:
+            if (
+                manifest_url == DEFAULT_UPDATE_MANIFEST_URL
+                and DEFAULT_GITHUB_RAW_MANIFEST_URL != manifest_url
+            ):
+                fallback_url = DEFAULT_GITHUB_RAW_MANIFEST_URL
+            else:
+                raise primary_exc
+
+        try:
+            return _fetch_manifest_from_url(fallback_url, github_token=token)
+        except ManifestFetchError as fallback_exc:
+            raise ManifestFetchError(
+                f"{primary_exc}; fallback also failed: {fallback_exc}"
+            ) from fallback_exc

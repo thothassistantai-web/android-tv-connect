@@ -91,8 +91,63 @@ class ManifestParseTests(unittest.TestCase):
         self.assertEqual(parsed.version, "1.1.0")
         self.assertEqual(parsed.version_code, 2)
 
+    def test_github_raw_manifest_fallback_url(self) -> None:
+        api = (
+            "https://api.github.com/repos/thothassistantai-web/"
+            "android-tv-connect/releases/latest"
+        )
+        self.assertEqual(
+            manifest.github_raw_manifest_fallback_url(api),
+            "https://github.com/thothassistantai-web/android-tv-connect/"
+            "releases/latest/download/update-manifest.json",
+        )
+        tagged = (
+            "https://api.github.com/repos/org/repo/releases/tags/v1.2.0"
+        )
+        self.assertEqual(
+            manifest.github_raw_manifest_fallback_url(tagged),
+            "https://github.com/org/repo/releases/download/v1.2.0/update-manifest.json",
+        )
+
+    def test_fetch_update_manifest_falls_back_on_api_failure(self) -> None:
+        api_url = (
+            "https://api.github.com/repos/thothassistantai-web/"
+            "android-tv-connect/releases/latest"
+        )
+        manifest_json = json.dumps(
+            {
+                "version": "1.1.0",
+                "versionCode": 2,
+                "bundleUrl": "https://example.com/bundle.tar.gz",
+            }
+        )
+
+        def fake_request(url: str, **kwargs: object) -> str:
+            if "api.github.com" in url:
+                raise manifest.ManifestFetchError("HTTP 403 for api")
+            return manifest_json
+
+        with patch.object(manifest, "_request_text", side_effect=fake_request):
+            parsed = manifest.fetch_update_manifest(api_url)
+
+        self.assertEqual(parsed.version, "1.1.0")
+        self.assertEqual(parsed.version_code, 2)
+
+    def test_request_headers_include_user_agent_and_token(self) -> None:
+        headers = manifest._build_request_headers(
+            accept="application/json",
+            github_token="secret-token",
+        )
+        self.assertEqual(headers["User-Agent"], manifest.USER_AGENT)
+        self.assertEqual(headers["Authorization"], "Bearer secret-token")
+
 
 class SymlinkTests(unittest.TestCase):
+    def test_resolve_data_root_from_env(self) -> None:
+        custom = Path("/tmp/atv-custom-home")
+        with patch.dict(os.environ, {"ATV_CONNECT_HOME": str(custom)}, clear=False):
+            self.assertEqual(paths.resolve_data_root(), custom.resolve())
+
     def test_set_current_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_root = Path(tmp) / "data"
@@ -102,9 +157,11 @@ class SymlinkTests(unittest.TestCase):
             (versions / "1.0.0").mkdir()
             (versions / "1.1.0").mkdir()
 
-            with patch.object(paths, "DATA_ROOT", data_root), patch.object(
-                paths, "VERSIONS_DIR", versions
-            ), patch.object(paths, "CURRENT_LINK", current):
+            with patch.object(paths, "resolve_data_root", return_value=data_root), patch.object(
+                paths, "data_root", return_value=data_root
+            ), patch.object(paths, "versions_dir", return_value=versions), patch.object(
+                paths, "current_link", return_value=current
+            ):
                 target = paths.set_current_symlink("1.1.0")
 
             self.assertTrue(current.is_symlink())

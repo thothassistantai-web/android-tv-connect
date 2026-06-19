@@ -7,24 +7,76 @@ import os
 import shutil
 from pathlib import Path
 
-from .constants import CURRENT_LINK, DATA_ROOT, INSTALLED_META, VERSIONS_DIR
+from .constants import DEFAULT_DATA_ROOT
 from .version import InstalledVersion
+
+_CONFIG_PATH = Path.home() / ".config" / "android-tv-connect" / "config.json"
+
+
+def resolve_data_root() -> Path:
+    """Return app install root (env ATV_CONNECT_HOME, config app_home, or default)."""
+    env = os.environ.get("ATV_CONNECT_HOME", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+
+    if _CONFIG_PATH.is_file():
+        try:
+            raw = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+            home = str(raw.get("app_home", "")).strip()
+            if home:
+                return Path(home).expanduser().resolve()
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+
+    return DEFAULT_DATA_ROOT
+
+
+def data_root() -> Path:
+    return resolve_data_root()
+
+
+def versions_dir() -> Path:
+    return data_root() / "versions"
+
+
+def current_link() -> Path:
+    return data_root() / "current"
+
+
+def installed_meta() -> Path:
+    return data_root() / "installed.json"
+
+
+def launcher_dir() -> Path:
+    """Directory containing android_tv_connect_launcher on PYTHONPATH."""
+    root = data_root()
+    if (root / "android_tv_connect_launcher").is_dir():
+        return root
+    return root / "launcher"
+
+
+def is_dev_checkout() -> bool:
+    """True when app_home points at a source tree (live checkout)."""
+    root = data_root()
+    return (root / "android_tv_connect").is_dir() and (root / "VERSION").is_file()
 
 
 def ensure_layout() -> None:
-    DATA_ROOT.mkdir(parents=True, exist_ok=True)
-    VERSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    root = data_root()
+    root.mkdir(parents=True, exist_ok=True)
+    versions_dir().mkdir(parents=True, exist_ok=True)
 
 
 def version_dir(version: str) -> Path:
     safe = version.strip().removeprefix("v").replace("/", "-")
-    return VERSIONS_DIR / safe
+    return versions_dir() / safe
 
 
 def read_installed_version() -> InstalledVersion:
-    if INSTALLED_META.is_file():
+    meta = installed_meta()
+    if meta.is_file():
         try:
-            raw = json.loads(INSTALLED_META.read_text(encoding="utf-8"))
+            raw = json.loads(meta.read_text(encoding="utf-8"))
             version = str(raw.get("version", "0.0.0"))
             code = int(raw.get("versionCode", raw.get("version_code", 0)))
             return InstalledVersion(version=version, version_code=code)
@@ -59,13 +111,14 @@ def read_version_from_tree(root: Path) -> InstalledVersion:
 def write_installed_meta(version: str, version_code: int) -> None:
     ensure_layout()
     payload = {"version": version, "versionCode": version_code}
-    INSTALLED_META.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    installed_meta().write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def resolve_current_root() -> Path | None:
-    if not CURRENT_LINK.exists():
+    link = current_link()
+    if not link.exists():
         return None
-    target = CURRENT_LINK.resolve()
+    target = link.resolve()
     if target.is_dir():
         return target
     return None
@@ -83,13 +136,15 @@ def set_current_symlink(version: str) -> Path:
     if not target.is_dir():
         raise FileNotFoundError(f"Version directory not found: {target}")
 
+    root = data_root()
+    link = current_link()
     ensure_layout()
-    temp_link = DATA_ROOT / ".current.tmp"
+    temp_link = root / ".current.tmp"
     if temp_link.exists() or temp_link.is_symlink():
         temp_link.unlink()
 
     os.symlink(target, temp_link)
-    temp_link.replace(CURRENT_LINK)
+    temp_link.replace(link)
     return target
 
 

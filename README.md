@@ -48,12 +48,14 @@ Or `./install.sh` (same installer).
 
 | Path | Purpose |
 |------|---------|
-| `~/.local/share/android-tv-connect/launcher/` | Stable updater (rarely changes) |
-| `~/.local/share/android-tv-connect/versions/<ver>/` | Versioned app bundles |
-| `~/.local/share/android-tv-connect/current` | Symlink to active version |
+| `<app_home>/launcher/` or checkout root (dev) | Stable updater |
+| `<app_home>/versions/<ver>/` | Versioned app bundles from updates |
+| `<app_home>/current` | Symlink to active version (or checkout in dev) |
 | `~/.local/bin/atv-connect` | User entry command |
 | `~/.local/share/applications/android-tv-connect.desktop` | App menu entry |
 | `~/.config/systemd/user/android-tv-connect-watch.service` | Auto-launch watcher |
+
+Default `<app_home>` is `~/.local/share/android-tv-connect/`. Set `"app_home"` in `config.json` or `ATV_CONNECT_HOME` to use a Programs checkout instead — see [docs/UPDATES.md](docs/UPDATES.md).
 
 ### udev rules (manual)
 
@@ -98,7 +100,18 @@ The watcher runs `atv-connect --watch`, which checks for updates then starts the
 
 ## Development
 
-Run from a source checkout:
+### Dev install (`app_home`)
+
+To run from this checkout via `atv-connect` (not a separate `~/.local` copy):
+
+```json
+// ~/.config/android-tv-connect/config.json
+{ "app_home": "/home/nova/Programs/Android TV Connect" }
+```
+
+Then `./scripts/install-local.sh`. See [docs/UPDATES.md](docs/UPDATES.md).
+
+Run from a source checkout without installing:
 
 ```bash
 PYTHONPATH=. python3 -m android_tv_connect_launcher

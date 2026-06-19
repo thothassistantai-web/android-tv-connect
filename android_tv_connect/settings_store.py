@@ -17,6 +17,7 @@ from .config import (
     default_config,
 )
 from .adb_settings import normalize_adb_config
+from .shortcuts import migrate_shortcuts
 
 SETTINGS_PATH = CONFIG_DIR / "config.json"
 

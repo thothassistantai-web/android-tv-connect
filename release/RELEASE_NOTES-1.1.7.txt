@@ -1,0 +1,6 @@
+Fix HDMI capture audio on FUSA / MacroSilicon dongle setups (v1.1.7).
+
+- Auto-discover PipeWire/Pulse audio from the MS2109 HDMI capture dongle (matches video auto-discovery).
+- Default capture audio is now "auto" instead of a fragile hard-coded ALSA node name.
+- When the dongle is connected but settings point at PC built-in audio, the app now uses capture audio instead.
+- Existing configs with wrong audio_device are migrated to auto on load.

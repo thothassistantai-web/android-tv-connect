@@ -17,10 +17,18 @@ AUTO_DEVICE = "auto"
 _DISCOVERY_CACHE_TTL_S = 30.0
 _USB_CACHE_TTL_S = 1.0
 
-_cache_lock = threading.Lock()
-_discovery_cache: dict[str, tuple[float, str | None]] = {}
+_CACHE_LOCK = threading.Lock()
+_video_discovery_cache: dict[str, tuple[float, str | None]] = {}
+_audio_discovery_cache: dict[str, tuple[float, str | None]] = {}
 _usb_cache: dict[str, tuple[float, bool]] = {}
 _warned_fallback: set[str] = set()
+
+_CAPTURE_AUDIO_MARKERS = (
+    "macrosilicon",
+    "ms2109",
+    "usb3.0 capture",
+)
+_DISABLED_AUDIO = frozenset({"disabled", "off", "none"})
 
 
 @dataclass(frozen=True)
@@ -37,7 +45,7 @@ class CaptureDeviceStatus:
 
 def _usb_capture_present(vendor_product: str) -> bool:
     now = time.monotonic()
-    with _cache_lock:
+    with _CACHE_LOCK:
         cached = _usb_cache.get(vendor_product)
         if cached and now - cached[0] < _USB_CACHE_TTL_S:
             return cached[1]
@@ -56,7 +64,7 @@ def _usb_capture_present(vendor_product: str) -> bool:
                 present = True
                 break
 
-    with _cache_lock:
+    with _CACHE_LOCK:
         _usb_cache[vendor_product] = (now, present)
     return present
 
@@ -68,9 +76,16 @@ def is_capture_usb_present(config: CaptureConfig | None = None) -> bool:
 
 
 def invalidate_capture_cache() -> None:
-    with _cache_lock:
-        _discovery_cache.clear()
+    with _CACHE_LOCK:
+        _video_discovery_cache.clear()
+        _audio_discovery_cache.clear()
         _usb_cache.clear()
+
+
+def is_capture_audio_source(name: str) -> bool:
+    """Return True when a PipeWire/Pulse source name looks like HDMI capture audio."""
+    haystack = (name or "").lower()
+    return any(marker in haystack for marker in _CAPTURE_AUDIO_MARKERS)
 
 
 def _usb_parent_matches(device_path: Path, vendor: str, product: str) -> bool:
@@ -114,8 +129,8 @@ def discover_video_device(vendor_product: str, *, use_cache: bool = True) -> str
     """Return the V4L2 node for the MacroSilicon capture dongle, if any."""
     now = time.monotonic()
     if use_cache:
-        with _cache_lock:
-            cached = _discovery_cache.get(vendor_product)
+        with _CACHE_LOCK:
+            cached = _video_discovery_cache.get(vendor_product)
             if cached and now - cached[0] < _DISCOVERY_CACHE_TTL_S:
                 return cached[1]
 
@@ -146,9 +161,102 @@ def discover_video_device(vendor_product: str, *, use_cache: bool = True) -> str
             chosen = candidates[0][1]
             LOG.debug("Discovered capture device %s for %s", chosen, vendor_product)
 
-    with _cache_lock:
-        _discovery_cache[vendor_product] = (now, chosen)
+    with _CACHE_LOCK:
+        _video_discovery_cache[vendor_product] = (now, chosen)
     return chosen
+
+
+def _audio_source_available(name: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["pactl", "list", "sources", "short"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        return False
+    return any(
+        line.split("\t", 2)[1].strip() == name
+        for line in result.stdout.splitlines()
+        if "\t" in line
+    )
+
+
+def discover_audio_device(vendor_product: str, *, use_cache: bool = True) -> str | None:
+    """Return the PipeWire/Pulse source for the MacroSilicon HDMI capture dongle."""
+    cache_key = f"audio:{vendor_product}"
+    now = time.monotonic()
+    if use_cache:
+        with _CACHE_LOCK:
+            cached = _audio_discovery_cache.get(cache_key)
+            if cached and now - cached[0] < _DISCOVERY_CACHE_TTL_S:
+                return cached[1]
+
+    from .media_enumeration import enumerate_audio_sources
+
+    chosen = None
+    for source in enumerate_audio_sources():
+        if is_capture_audio_source(source.name) or is_capture_audio_source(
+            source.description
+        ):
+            chosen = source.name
+            break
+
+    with _CACHE_LOCK:
+        _audio_discovery_cache[cache_key] = (now, chosen)
+    if chosen:
+        LOG.debug("Discovered capture audio %s for %s", chosen, vendor_product)
+    return chosen
+
+
+def resolve_audio_device(config: CaptureConfig | None = None, *, use_cache: bool = True) -> str | None:
+    """Resolve configured or auto-discovered HDMI capture audio source."""
+    cfg = config or default_capture_config()
+    configured = (cfg.audio_device or "").strip()
+
+    if configured.lower() in _DISABLED_AUDIO:
+        return None
+
+    discovered = None
+    if _usb_capture_present(cfg.usb_vendor_product):
+        discovered = discover_audio_device(cfg.usb_vendor_product, use_cache=use_cache)
+
+    if configured.lower() in ("", AUTO_DEVICE):
+        return discovered
+
+    if is_capture_audio_source(configured):
+        return configured
+
+    if discovered:
+        key = f"audio:{configured}->{discovered}"
+        if key not in _warned_fallback:
+            _warned_fallback.add(key)
+            LOG.warning(
+                "Configured audio %s is not from HDMI capture; using %s",
+                configured,
+                discovered,
+            )
+        return discovered
+
+    if _audio_source_available(configured):
+        return configured
+
+    if discovered:
+        key = f"audio-missing:{configured}->{discovered}"
+        if key not in _warned_fallback:
+            _warned_fallback.add(key)
+            LOG.warning(
+                "Configured audio device %s unavailable; using %s",
+                configured,
+                discovered,
+            )
+        return discovered
+
+    return configured
 
 
 def resolve_video_device(config: CaptureConfig | None = None, *, use_cache: bool = True) -> str | None:

@@ -7,7 +7,13 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, ".")
-from android_tv_connect.capture_device import discover_video_device, resolve_video_device
+from android_tv_connect.capture_device import (
+    discover_audio_device,
+    discover_video_device,
+    is_capture_audio_source,
+    resolve_audio_device,
+    resolve_video_device,
+)
 from android_tv_connect.config import CaptureConfig
 
 
@@ -27,6 +33,45 @@ class CaptureDeviceTests(unittest.TestCase):
         node = discover_video_device("534d:2109")
         if node:
             self.assertTrue(node.startswith("/dev/video"))
+
+    def test_discover_audio_finds_macrosilicon_on_system(self) -> None:
+        source = discover_audio_device("534d:2109")
+        if source:
+            self.assertTrue(is_capture_audio_source(source))
+
+    def test_resolve_audio_prefers_capture_over_builtin(self) -> None:
+        cfg = CaptureConfig(
+            audio_device="alsa_input.pci-0000_00_1b.0.analog-stereo",
+            usb_vendor_product="534d:2109",
+        )
+        with patch(
+            "android_tv_connect.capture_device._usb_capture_present",
+            return_value=True,
+        ):
+            with patch(
+                "android_tv_connect.capture_device.discover_audio_device",
+                return_value="alsa_input.usb-MACROSILICON_USB3.0_Capture-02.analog-stereo",
+            ):
+                resolved = resolve_audio_device(cfg)
+        self.assertEqual(
+            resolved,
+            "alsa_input.usb-MACROSILICON_USB3.0_Capture-02.analog-stereo",
+        )
+
+    def test_resolve_audio_auto_uses_discovered(self) -> None:
+        cfg = CaptureConfig(audio_device="auto", usb_vendor_product="534d:2109")
+        with patch(
+            "android_tv_connect.capture_device._usb_capture_present",
+            return_value=True,
+        ):
+            with patch(
+                "android_tv_connect.capture_device.discover_audio_device",
+                return_value="alsa_input.usb-MACROSILICON_USB3.0_Capture-02.analog-stereo",
+            ):
+                self.assertEqual(
+                    resolve_audio_device(cfg),
+                    "alsa_input.usb-MACROSILICON_USB3.0_Capture-02.analog-stereo",
+                )
 
 
 if __name__ == "__main__":

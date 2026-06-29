@@ -291,12 +291,15 @@ def test_dbus_name(report: Report) -> None:
 
 
 def test_audio_source(report: Report) -> None:
+    from android_tv_connect.capture_device import resolve_audio_device
+
     cfg = load_config().capture
+    resolved = resolve_audio_device(cfg) or cfg.audio_device
     t0 = time.monotonic()
     proc = _run(["pactl", "list", "sources", "short"])
     ms = (time.monotonic() - t0) * 1000
-    ok = cfg.audio_device in proc.stdout
-    report.add("PipeWire audio source", ok, cfg.audio_device, ms)
+    ok = resolved in proc.stdout
+    report.add("PipeWire audio source", ok, resolved, ms)
 
 
 def run_all(skip_gstreamer: bool = False) -> Report:

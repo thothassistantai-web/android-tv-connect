@@ -55,7 +55,7 @@ from .update_ui import check_for_updates
 _AUTO_WIRED_LABEL = "Auto (first USB)"
 _AUTO_WIRELESS_LABEL = "Auto (first wireless)"
 _AUTO_VIDEO_LABEL = "Auto (discover dongle)"
-_AUTO_AUDIO_LABEL = "Auto (default source)"
+_AUTO_AUDIO_LABEL = "Auto (HDMI capture dongle)"
 _MANUAL_LABEL = "Manual…"
 _CUSTOM_PORT_LABEL = "Custom…"
 _SEAMLESS_DOCS = "docs/SEAMLESS-UX.md"

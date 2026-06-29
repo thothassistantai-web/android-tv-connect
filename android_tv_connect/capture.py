@@ -17,6 +17,7 @@ from .capture_device import (
     capture_device_status,
     invalidate_capture_cache,
     is_capture_usb_present,
+    resolve_audio_device,
     resolve_video_device,
 )
 from .config import CaptureConfig, default_capture_config
@@ -64,6 +65,7 @@ class CapturePipeline:
         self._running = False
         self._state = "stopped"
         self._effective_video_device: str | None = None
+        self._effective_audio_device: str | None = None
         self._usb_present_last = True
         self._unplug_notified = False
         self._last_frame_at = 0.0
@@ -109,11 +111,8 @@ class CapturePipeline:
         )
 
     def _audio_pipeline_desc(self) -> str:
-        cfg = self.config
-        device = (cfg.audio_device or "").strip()
-        device_prop = ""
-        if device and device.lower() != "auto":
-            device_prop = f" device={device}"
+        device = (self._effective_audio_device or "").strip()
+        device_prop = f" device={device}" if device else ""
         return (
             f"pulsesrc name=audiosrc{device_prop} ! "
             f"audioconvert ! audioresample ! "
@@ -224,6 +223,9 @@ class CapturePipeline:
         return True
 
     def _create_audio_pipeline(self) -> bool:
+        self._effective_audio_device = resolve_audio_device(self.config)
+        if not self._effective_audio_device:
+            return False
         try:
             self._audio_pipeline = Gst.parse_launch(self._audio_pipeline_desc())
         except GLib.Error as exc:
@@ -481,6 +483,10 @@ class CapturePipeline:
     @property
     def effective_video_device(self) -> str | None:
         return self._effective_video_device
+
+    @property
+    def effective_audio_device(self) -> str | None:
+        return self._effective_audio_device
 
     @staticmethod
     def _stream_params(config: CaptureConfig) -> tuple:

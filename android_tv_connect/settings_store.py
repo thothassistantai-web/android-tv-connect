@@ -23,6 +23,29 @@ from .shortcuts import migrate_shortcuts
 SETTINGS_PATH = CONFIG_DIR / "config.json"
 
 
+def _migrate_capture_audio(capture: CaptureConfig) -> CaptureConfig:
+    """Reset misconfigured capture audio when the HDMI dongle is connected."""
+    from .capture_device import (
+        discover_audio_device,
+        is_capture_audio_source,
+        is_capture_usb_present,
+    )
+
+    if not is_capture_usb_present(capture):
+        return capture
+
+    configured = (capture.audio_device or "").strip()
+    if configured.lower() in {"disabled", "off", "none", "", "auto"}:
+        return capture
+    if is_capture_audio_source(configured):
+        return capture
+
+    discovered = discover_audio_device(capture.usb_vendor_product)
+    if discovered:
+        return replace(capture, audio_device="auto")
+    return capture
+
+
 def _merge_dataclass(cls, data: dict[str, Any] | None):
     base = cls()
     if not data:
@@ -70,7 +93,7 @@ def load_config() -> AppConfig:
 
     return AppConfig(
         adb=normalize_adb_config(_merge_dataclass(AdbConfig, raw.get("adb"))),
-        capture=_merge_dataclass(CaptureConfig, raw.get("capture")),
+        capture=_migrate_capture_audio(_merge_dataclass(CaptureConfig, raw.get("capture"))),
         scrcpy=_merge_dataclass(ScrcpyConfig, raw.get("scrcpy")),
         window=WindowConfig(
             last_mode=window_raw.get("last_mode", defaults.window.last_mode),

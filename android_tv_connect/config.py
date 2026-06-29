@@ -25,9 +25,7 @@ class CaptureConfig:
     width: int = 1920
     height: int = 1080
     framerate: int = 30
-    audio_device: str = (
-        "alsa_input.usb-MACROSILICON_USB3.0_Capture-02.analog-stereo"
-    )
+    audio_device: str = "auto"
     reconnect_interval_ms: int = 2000
     max_reconnect_backoff_ms: int = 10000
 

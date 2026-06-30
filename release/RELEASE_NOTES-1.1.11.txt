@@ -1,0 +1,7 @@
+Android TV Connect 1.1.11
+=========================
+
+- Add local Unix-socket diagnostics IPC (~/.local/share/android-tv-connect/diagnostics.sock) for Cursor agents and shell tooling.
+- New ``atv-diag`` CLI (``scripts/atv-diag.py``) with commands: status, enumerate, audio-play, audio-stop, audio-test-next, capture-restart, logs, ping.
+- Diagnostics server runs in a background thread; GTK/GStreamer work is dispatched via GLib idle handlers so the UI never blocks.
+- ``python3 -m android_tv_connect --diag <command>`` delegates to the diagnostics CLI.

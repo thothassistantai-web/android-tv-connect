@@ -7,7 +7,9 @@ import unittest
 
 sys.path.insert(0, ".")
 from android_tv_connect.audio_source_test import (
+    AUDITION_PID_FILE,
     build_audio_test_queue,
+    build_pulsesrc_audition_pipeline,
     next_queue_index,
 )
 from android_tv_connect.media_enumeration import AudioSourceOption
@@ -46,6 +48,21 @@ class AudioSourceTestTests(unittest.TestCase):
         self.assertEqual(next_queue_index(queue, "a"), 1)
         self.assertIsNone(next_queue_index(queue, "b"))
         self.assertEqual(next_queue_index(queue, "missing"), 0)
+
+    def test_build_pulsesrc_audition_pipeline(self) -> None:
+        pipeline = build_pulsesrc_audition_pipeline(
+            "alsa_input.usb-MACROSILICON_USB3.0_Capture-02.analog-stereo"
+        )
+        self.assertIn("pulsesrc", pipeline)
+        self.assertIn("device=alsa_input.usb-MACROSILICON_USB3.0_Capture-02.analog-stereo", pipeline)
+        self.assertIn("audioconvert", pipeline)
+        self.assertIn("audioresample", pipeline)
+        self.assertIn("autoaudiosink", pipeline)
+        self.assertNotIn("pipewiresrc", pipeline)
+        self.assertNotIn("num-buffers", pipeline)
+
+    def test_audition_pid_file_constant(self) -> None:
+        self.assertEqual(AUDITION_PID_FILE, "/tmp/atv-audio-test-player.pid")
 
 
 if __name__ == "__main__":

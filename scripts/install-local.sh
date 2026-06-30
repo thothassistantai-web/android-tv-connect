@@ -147,6 +147,17 @@ fi
 EOF
     chmod +x "${BIN_DIR}/atv-connect"
 
+    info "Installing ${BIN_DIR}/atv-diag"
+    cat > "${BIN_DIR}/atv-diag" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+export ATV_CONNECT_HOME="${DATA_ROOT}"
+APP_ROOT="\$(readlink -f "${CURRENT_LINK}")"
+export PYTHONPATH="\${APP_ROOT}\${PYTHONPATH:+:\${PYTHONPATH}}"
+exec python3 "\${APP_ROOT}/scripts/atv-diag.py" "\$@"
+EOF
+    chmod +x "${BIN_DIR}/atv-diag"
+
     if [[ -x "${BIN_DIR}/android-tv-connect" ]]; then
         rm -f "${BIN_DIR}/android-tv-connect"
     fi
@@ -243,6 +254,7 @@ Android TV Connect installed.
 
   App version:      ${VERSION}
   Entry command:    atv-connect
+  Diagnostics CLI:  atv-diag status
   Launcher module:  python3 -m android_tv_connect_launcher
   Data directory:   ${DATA_ROOT}
   Watcher service:  systemctl --user status android-tv-connect-watch

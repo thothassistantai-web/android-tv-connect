@@ -1,0 +1,5 @@
+Restore working HDMI capture audio (v1.1.10).
+
+- Revert capture playback to v1.1.7 pulsesrc pipeline (audioconvert, audioresample, autoaudiosink).
+- Remove pipewiresrc, queue, and forced S16LE caps from the live capture path; v1.1.8–v1.1.9 broke audio on PipeWire systems where pulsesrc worked.
+- Keep pipewiresrc probes in scripts/audio-source-probe.py for diagnostics only.

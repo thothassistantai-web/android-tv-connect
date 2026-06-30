@@ -102,11 +102,29 @@ def run_app() -> int:
         clear_ui_pid()
 
 
+def _run_diag_client(argv: list[str]) -> int:
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script = os.path.join(root, "scripts", "atv-diag.py")
+    if not os.path.isfile(script):
+        print("atv-diag.py not found; reinstall Android TV Connect", file=sys.stderr)
+        return 1
+    result = subprocess.run(
+        [sys.executable, script, *argv],
+        check=False,
+    )
+    return int(result.returncode)
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv and argv[0] == "--diag":
+        return _run_diag_client(argv[1:])
 
     parser = argparse.ArgumentParser(description=APP_NAME)
     parser.add_argument(

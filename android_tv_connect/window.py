@@ -63,6 +63,7 @@ from .settings_apply import SettingsApplyController
 from .settings_dialog import SettingsDialog
 from .settings_draft import capture_stream_changed, config_snapshot
 from .settings_store import load_config, save_config
+from .diagnostics_server import AppDiagnosticsBackend, DiagnosticsServer
 
 LOG = logging.getLogger(__name__)
 
@@ -522,6 +523,7 @@ class MainWindow(Adw.ApplicationWindow):
             on_usb_unplugged=self._on_capture_usb_unplugged,
             on_usb_reconnected=self._on_capture_usb_reconnected,
         )
+        self._diagnostics_backend = AppDiagnosticsBackend(self)
 
         self.connect("close-request", self._on_close_request)
         self.connect("notify::width", self._on_size_changed)
@@ -1174,6 +1176,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_close_request(self, *_args) -> bool:
         self._persist_geometry()
+        self._diagnostics_backend.shutdown()
         self._scrcpy.stop()
         self._capture.stop()
         self._adb.disconnect()
@@ -1356,15 +1359,24 @@ class AndroidTvApp(Adw.Application):
         self._config = load_config()
         self._window: MainWindow | None = None
         self._creating_window = False
+        self._diagnostics = DiagnosticsServer(self._diagnostics_backend)
         self.connect("activate", self._on_activate)
 
+    def _diagnostics_backend(self) -> AppDiagnosticsBackend | None:
+        window = self._window
+        if window is None:
+            return None
+        return window._diagnostics_backend
+
     def _on_window_destroy(self, *_args) -> None:
+        self._diagnostics.stop()
         self._window = None
         self.quit()
 
     def _on_quit_requested(self, *_args) -> None:
         if self._window is not None and self._window._settings_dialog is not None:
             self._window._settings_dialog.close()
+        self._diagnostics.stop()
         self.quit()
 
     def _on_activate(self, _app: Adw.Application) -> None:
@@ -1386,6 +1398,7 @@ class AndroidTvApp(Adw.Application):
 
     def do_startup(self) -> None:
         Adw.Application.do_startup(self)
+        self._diagnostics.start()
 
         quit_action = Gio.SimpleAction.new("quit", None)
         quit_action.connect("activate", self._on_quit_requested)

@@ -25,6 +25,7 @@ from .adb_settings import (
     wireless_host_is_auto,
 )
 from .audio_source_test import (
+    AudioAuditionPlayer,
     AudioTestSource,
     build_audio_test_queue,
     next_queue_index,
@@ -66,7 +67,7 @@ _CUSTOM_PORT_LABEL = "Custom…"
 _SEAMLESS_DOCS = "docs/SEAMLESS-UX.md"
 _LIVE_APPLY_DEBOUNCE_MS = 300
 _AUDIO_CONFIRM_DELAY_MS = 900
-_AUDIO_TEST_WARMUP_MS = 1200
+_AUDIO_TEST_WARMUP_MS = 400
 
 
 class SettingsDialog(Adw.Window):
@@ -91,6 +92,7 @@ class SettingsDialog(Adw.Window):
         self._audio_line_test_active = False
         self._audio_line_test_queue: list[AudioTestSource] = []
         self._audio_line_test_index = 0
+        self._audio_audition = AudioAuditionPlayer()
         self.set_title("Android TV Connect Settings")
         self.set_default_size(520, 640)
 
@@ -149,6 +151,7 @@ class SettingsDialog(Adw.Window):
         self._cancel_audio_confirm_timer()
         self._dismiss_audio_confirm_dialog()
         self._stop_audio_line_test()
+        self._stop_audio_audition()
 
     def _on_close_request(self, *_args) -> bool:
         if self._closing_saved or self._closed:
@@ -578,7 +581,7 @@ class SettingsDialog(Adw.Window):
 
         test_row = Adw.ActionRow(title="Test audio sources")
         test_row.set_subtitle(
-            "Try each input one by one. You confirm before the next source is tried."
+            "Plays each input continuously until you confirm or try the next one."
         )
         self._audio_test_button = Gtk.Button(label="Start test")
         self._audio_test_button.connect("clicked", self._on_start_audio_line_test)
@@ -668,7 +671,19 @@ class SettingsDialog(Adw.Window):
             self._audio_confirm_dialog.close()
             self._audio_confirm_dialog = None
 
+    def _stop_audio_audition(self) -> None:
+        self._audio_audition.stop()
+
+    def _start_audio_audition(self, source: AudioTestSource) -> None:
+        if not self._audio_audition.start(source.name):
+            self._show_info(
+                "Audio test failed",
+                f"Could not start playback for “{source.label}”. "
+                "Check that the source is available and try Refresh capture devices.",
+            )
+
     def _stop_audio_line_test(self) -> None:
+        self._stop_audio_audition()
         self._audio_line_test_active = False
         self._audio_line_test_queue = []
         self._audio_line_test_index = 0
@@ -796,6 +811,7 @@ class SettingsDialog(Adw.Window):
 
     def _apply_audio_source_for_test(self, source: AudioTestSource) -> None:
         self._select_audio_source_name(source.name)
+        self._start_audio_audition(source)
         self._schedule_live_apply()
         self._update_unsaved_indicator()
 
@@ -870,20 +886,25 @@ class SettingsDialog(Adw.Window):
         return False
 
     def _present_audio_confirm_dialog(self, source: AudioTestSource) -> None:
+        if self._audio_audition.device != source.name or not self._audio_audition.is_playing():
+            self._start_audio_audition(source)
         progress = self._line_test_progress_text()
         progress_line = f"{progress}\n\n" if progress else ""
+        playing = "Audio is playing now. " if self._audio_audition.is_playing() else ""
         dialog = Adw.MessageDialog(
             transient_for=self,
             heading="Can you hear audio?",
             body=(
                 f"{progress_line}"
                 f"Playback is using “{source.label}”.\n\n"
+                f"{playing}"
                 "Listen for HDMI capture audio from the TV. "
-                "Choose “No” to try the next source, or “Yes” to keep this one."
+                "Click “I hear it — stop” when you hear sound, "
+                "or “No — try next” to audition another input."
             ),
         )
-        dialog.add_response("next", "No")
-        dialog.add_response("yes", "Yes")
+        dialog.add_response("next", "No — try next")
+        dialog.add_response("yes", "I hear it — stop")
         dialog.set_response_appearance("yes", Adw.ResponseAppearance.SUGGESTED)
         dialog.set_default_response("yes")
         dialog.set_close_response("yes")
@@ -904,6 +925,7 @@ class SettingsDialog(Adw.Window):
     def _on_audio_confirm_response(self, response: str) -> None:
         if self._closed:
             return
+        self._stop_audio_audition()
         if response == "yes":
             self._stop_audio_line_test()
             return

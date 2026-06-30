@@ -310,7 +310,20 @@ def list_viable_audio_sources(sources=None):
     return enumerate_audio_sources()
 
 
+# MS2109 exposes 48 kHz stereo S16LE PCM after the kernel usb-audio quirk
+# (5.8+). Without explicit caps, pipewiresrc often negotiates mono float and
+# playback sounds like crackling/static.
+_MS2109_AUDIO_CAPS = "audio/x-raw,format=S16LE,rate=48000,channels=2"
+_MS2109_AUDIO_QUEUE = (
+    "queue max-size-buffers=60 max-size-time=200000000 leaky=downstream"
+)
+
 _pipewiresrc_available: bool | None = None
+
+
+def ms2109_audio_caps() -> str:
+    """GStreamer caps string for MacroSilicon HDMI capture audio."""
+    return _MS2109_AUDIO_CAPS
 
 
 def pipewiresrc_available() -> bool:
@@ -334,9 +347,14 @@ def pipewiresrc_available() -> bool:
 
 def build_audio_source_segment(device: str) -> str:
     """Return the GStreamer launch prefix for HDMI capture audio input."""
+    tail = (
+        f"{_MS2109_AUDIO_QUEUE} ! "
+        f"audioconvert ! audioresample ! {_MS2109_AUDIO_CAPS} ! "
+    )
     if pipewiresrc_available():
         return (
-            f"pipewiresrc name=audiosrc target-object={device} do-timestamp=true ! "
-            f"queue max-size-buffers=30 leaky=downstream ! "
+            f"pipewiresrc name=audiosrc target-object={device} "
+            f"provide-clock=false do-timestamp=true ! "
+            f"{tail}"
         )
-    return f"pulsesrc name=audiosrc device={device} ! "
+    return f"pulsesrc name=audiosrc device={device} ! {tail}"

@@ -130,7 +130,6 @@ class CapturePipeline:
             return ""
         return (
             f"{build_audio_source_segment(device)}"
-            f"audioconvert ! audioresample ! "
             f"autoaudiosink sync=false"
         )
 

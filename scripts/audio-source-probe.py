@@ -12,7 +12,7 @@ from dataclasses import dataclass
 sys.path.insert(0, ".")
 
 from android_tv_connect.audio_source_test import build_audio_test_queue
-from android_tv_connect.capture_device import resolve_audio_device
+from android_tv_connect.capture_device import pipewiresrc_available, resolve_audio_device
 from android_tv_connect.config import default_capture_config
 from android_tv_connect.media_enumeration import enumerate_audio_sources
 
@@ -55,6 +55,30 @@ def _alsa_capture_devices() -> list[str]:
     return [line.strip() for line in proc.stdout.splitlines() if line.strip().startswith("card")]
 
 
+def _probe_pipewiresrc(source_name: str, *, seconds: float, buffers: int) -> tuple[bool, str]:
+    cmd = [
+        "gst-launch-1.0",
+        "-q",
+        "pipewiresrc",
+        f"target-object={source_name}",
+        "provide-clock=false",
+        f"num-buffers={buffers}",
+        "!",
+        "audioconvert",
+        "!",
+        "audio/x-raw,format=S16LE,rate=48000,channels=2",
+        "!",
+        "fakesink",
+        "sync=false",
+    ]
+    proc = _run(cmd, timeout=seconds + 2.0)
+    if proc.returncode == 0:
+        return True, f"opened and captured {buffers} buffers"
+    tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+    detail = tail[-1][:160] if tail else f"exit {proc.returncode}"
+    return False, detail
+
+
 def _probe_pulsesrc(source_name: str, *, seconds: float, buffers: int) -> tuple[bool, str]:
     cmd = [
         "gst-launch-1.0",
@@ -64,6 +88,8 @@ def _probe_pulsesrc(source_name: str, *, seconds: float, buffers: int) -> tuple[
         f"num-buffers={buffers}",
         "!",
         "audioconvert",
+        "!",
+        "audio/x-raw,format=S16LE,rate=48000,channels=2",
         "!",
         "fakesink",
         "sync=false",
@@ -97,11 +123,16 @@ def probe_sources(
     )
 
     results: list[ProbeResult] = []
+    use_pipewire = pipewiresrc_available()
     for item in queue:
         if skip_probe:
             ok, detail = True, "probe skipped"
+        elif _is_recommended_capture_source(item.name, item.label) and use_pipewire:
+            ok, detail = _probe_pipewiresrc(item.name, seconds=seconds, buffers=buffers)
+            detail = f"pipewiresrc: {detail}"
         else:
             ok, detail = _probe_pulsesrc(item.name, seconds=seconds, buffers=buffers)
+            detail = f"pulsesrc: {detail}"
         results.append(
             ProbeResult(
                 name=item.name,
@@ -185,7 +216,7 @@ def main() -> int:
         "--buffers",
         type=int,
         default=80,
-        help="num-buffers for pulsesrc probe (default: 80)",
+        help="num-buffers for GStreamer probe (default: 80)",
     )
     parser.add_argument(
         "--skip-probe",

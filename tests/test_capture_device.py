@@ -85,6 +85,9 @@ class CaptureDeviceTests(unittest.TestCase):
             )
         self.assertIn("pipewiresrc", segment)
         self.assertIn("target-object=", segment)
+        self.assertIn("provide-clock=false", segment)
+        self.assertIn("format=S16LE,rate=48000,channels=2", segment)
+        self.assertIn("leaky=downstream", segment)
 
     def test_build_audio_source_falls_back_to_pulsesrc(self) -> None:
         with patch(
@@ -94,6 +97,7 @@ class CaptureDeviceTests(unittest.TestCase):
             segment = build_audio_source_segment("custom.source")
         self.assertIn("pulsesrc", segment)
         self.assertIn("device=custom.source", segment)
+        self.assertIn("format=S16LE,rate=48000,channels=2", segment)
 
 
 if __name__ == "__main__":

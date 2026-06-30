@@ -1,0 +1,6 @@
+Fix MS2109 HDMI audio crackling with explicit S16LE caps (v1.1.9).
+
+- Force pipewiresrc/pulsesrc through 48 kHz stereo S16LE with provide-clock=false.
+- Normalize audio in build_audio_source_segment (queue, audioconvert, audioresample).
+- Remove duplicate audioconvert from capture.py audio sink path.
+- Extend audio-source-probe.py with pipewiresrc probes and S16LE caps.

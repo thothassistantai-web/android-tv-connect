@@ -1,0 +1,9 @@
+Fix MacroSilicon HDMI audio capture and harden async pipeline paths (v1.1.8).
+
+- Prefer GStreamer pipewiresrc over pulsesrc for MacroSilicon HDMI capture audio (with pulsesrc fallback).
+- Audio pipeline startup uses a longer async state wait and logs the active capture source.
+- Capture failure, reconnect, and USB-unplug teardown no longer block the GTK main thread.
+- PipeWire/Pulse enumeration parsing fixes for pactl short output and pw-cli node listings.
+- Settings → Test audio sources with Yes/No confirmation (from v1.1.7).
+- Settings Save/Cancel/Escape close instantly via SettingsApplyController (from v1.1.7).
+- Add scripts/audio-source-probe.py for diagnosing HDMI audio sources on the host.

@@ -8,9 +8,11 @@ from unittest.mock import patch
 
 sys.path.insert(0, ".")
 from android_tv_connect.capture_device import (
+    build_audio_source_segment,
     discover_audio_device,
     discover_video_device,
     is_capture_audio_source,
+    pipewiresrc_available,
     resolve_audio_device,
     resolve_video_device,
 )
@@ -72,6 +74,26 @@ class CaptureDeviceTests(unittest.TestCase):
                     resolve_audio_device(cfg),
                     "alsa_input.usb-MACROSILICON_USB3.0_Capture-02.analog-stereo",
                 )
+
+    def test_build_audio_source_prefers_pipewiresrc(self) -> None:
+        with patch(
+            "android_tv_connect.capture_device.pipewiresrc_available",
+            return_value=True,
+        ):
+            segment = build_audio_source_segment(
+                "alsa_input.usb-MACROSILICON_USB3.0_Capture-02.analog-stereo"
+            )
+        self.assertIn("pipewiresrc", segment)
+        self.assertIn("target-object=", segment)
+
+    def test_build_audio_source_falls_back_to_pulsesrc(self) -> None:
+        with patch(
+            "android_tv_connect.capture_device.pipewiresrc_available",
+            return_value=False,
+        ):
+            segment = build_audio_source_segment("custom.source")
+        self.assertIn("pulsesrc", segment)
+        self.assertIn("device=custom.source", segment)
 
 
 if __name__ == "__main__":

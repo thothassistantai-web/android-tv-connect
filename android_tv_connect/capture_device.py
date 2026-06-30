@@ -308,3 +308,35 @@ def list_viable_audio_sources(sources=None):
     if sources is not None:
         return list(sources)
     return enumerate_audio_sources()
+
+
+_pipewiresrc_available: bool | None = None
+
+
+def pipewiresrc_available() -> bool:
+    """Return True when the native GStreamer pipewiresrc element is installed."""
+    global _pipewiresrc_available
+    if _pipewiresrc_available is not None:
+        return _pipewiresrc_available
+    try:
+        import gi
+
+        gi.require_version("Gst", "1.0")
+        from gi.repository import Gst
+
+        if not Gst.is_initialized():
+            Gst.init(None)
+        _pipewiresrc_available = Gst.ElementFactory.find("pipewiresrc") is not None
+    except (ImportError, ValueError):
+        _pipewiresrc_available = False
+    return _pipewiresrc_available
+
+
+def build_audio_source_segment(device: str) -> str:
+    """Return the GStreamer launch prefix for HDMI capture audio input."""
+    if pipewiresrc_available():
+        return (
+            f"pipewiresrc name=audiosrc target-object={device} do-timestamp=true ! "
+            f"queue max-size-buffers=30 leaky=downstream ! "
+        )
+    return f"pulsesrc name=audiosrc device={device} ! "

@@ -15,6 +15,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib, Gst
 
 from .capture_device import (
+    build_audio_source_segment,
     capture_device_status,
     invalidate_capture_cache,
     is_capture_usb_present,
@@ -32,6 +33,7 @@ UsbCallback = Callable[[], None]
 DEVICE_WATCH_MS = 2000
 FRAME_STALL_S = 8.0
 RECONNECT_STUCK_S = 45.0
+AUDIO_STATE_TIMEOUT_MS = 2000
 
 
 class CapturePipeline:
@@ -124,9 +126,10 @@ class CapturePipeline:
 
     def _audio_pipeline_desc(self) -> str:
         device = (self._effective_audio_device or "").strip()
-        device_prop = f" device={device}" if device else ""
+        if not device:
+            return ""
         return (
-            f"pulsesrc name=audiosrc{device_prop} ! "
+            f"{build_audio_source_segment(device)}"
             f"audioconvert ! audioresample ! "
             f"autoaudiosink sync=false"
         )
@@ -249,12 +252,18 @@ class CapturePipeline:
         self._audio_bus_watch_id = self._add_bus_watch(self._audio_pipeline, "audio")
         return True
 
-    def _set_pipeline_state(self, pipeline: Gst.Pipeline, state: Gst.State) -> bool:
+    def _set_pipeline_state(
+        self,
+        pipeline: Gst.Pipeline,
+        state: Gst.State,
+        *,
+        timeout_ms: int = 100,
+    ) -> bool:
         result = pipeline.set_state(state)
         if result == Gst.StateChangeReturn.FAILURE:
             return False
         if result == Gst.StateChangeReturn.ASYNC:
-            _change, current, pending = pipeline.get_state(100 * Gst.MSECOND)
+            _change, current, pending = pipeline.get_state(timeout_ms * Gst.MSECOND)
             return current == state or pending == state
         return True
 
@@ -279,9 +288,18 @@ class CapturePipeline:
             return False
 
         if self._create_audio_pipeline():
-            if not self._set_pipeline_state(self._audio_pipeline, Gst.State.PLAYING):
-                LOG.warning("Audio pipeline failed to start; continuing video-only")
+            if not self._set_pipeline_state(
+                self._audio_pipeline,
+                Gst.State.PLAYING,
+                timeout_ms=AUDIO_STATE_TIMEOUT_MS,
+            ):
+                LOG.warning(
+                    "Audio pipeline failed to start for %s; continuing video-only",
+                    self._effective_audio_device,
+                )
                 self._teardown_audio_pipeline()
+            else:
+                LOG.info("Audio capture started on %s", self._effective_audio_device)
         else:
             LOG.warning("Audio pipeline unavailable; continuing video-only")
 
@@ -328,8 +346,18 @@ class CapturePipeline:
     def _handle_video_failure(self) -> None:
         if not self._running or self._user_paused:
             return
-        self._teardown_pipelines()
-        status = capture_device_status(self.config)
+        threading.Thread(
+            target=self._handle_video_failure_worker,
+            daemon=True,
+            name="capture-failure",
+        ).start()
+
+    def _handle_video_failure_worker(self) -> None:
+        if not self._running or self._user_paused:
+            return
+        with self._config_lock:
+            self._teardown_pipelines()
+            status = capture_device_status(self.config)
         if not status.usb_present:
             self._set_state("disconnected")
         else:
@@ -354,16 +382,32 @@ class CapturePipeline:
         self._reconnect_source_id = None
         if not self._running or self._user_paused:
             return False
+        threading.Thread(
+            target=self._attempt_reconnect_worker,
+            daemon=True,
+            name="capture-reconnect",
+        ).start()
+        return False
 
-        if self._reconnecting_since > 0:
-            stuck_for = time.monotonic() - self._reconnecting_since
-            if stuck_for >= RECONNECT_STUCK_S:
-                LOG.warning("Capture reconnect stuck %.0fs — forcing pipeline reset", stuck_for)
-                self._teardown_pipelines()
-                self._reconnect_backoff_ms = self.config.reconnect_interval_ms
+    def _attempt_reconnect_worker(self) -> None:
+        if not self._running or self._user_paused:
+            return
 
-        if self._start_pipelines():
-            return False
+        with self._config_lock:
+            if self._reconnecting_since > 0:
+                stuck_for = time.monotonic() - self._reconnecting_since
+                if stuck_for >= RECONNECT_STUCK_S:
+                    LOG.warning(
+                        "Capture reconnect stuck %.0fs — forcing pipeline reset",
+                        stuck_for,
+                    )
+                    self._teardown_pipelines()
+                    self._reconnect_backoff_ms = self.config.reconnect_interval_ms
+
+            started = self._start_pipelines()
+
+        if started:
+            return
 
         status = capture_device_status(self.config)
         if not status.usb_present:
@@ -378,7 +422,6 @@ class CapturePipeline:
             self.config.max_reconnect_backoff_ms,
         )
         self._schedule_reconnect()
-        return False
 
     def _start_device_watch(self) -> None:
         if self._device_watch_source_id is not None:
@@ -414,7 +457,11 @@ class CapturePipeline:
         if not usb_present and self._usb_present_last:
             LOG.warning("Capture USB device unplugged")
             invalidate_capture_cache()
-            self._teardown_pipelines()
+            threading.Thread(
+                target=self._teardown_pipelines,
+                daemon=True,
+                name="capture-unplug-teardown",
+            ).start()
             self._set_state("disconnected")
             if not self._unplug_notified and self._on_usb_unplugged:
                 self._unplug_notified = True

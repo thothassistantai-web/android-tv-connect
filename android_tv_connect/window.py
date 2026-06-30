@@ -59,7 +59,9 @@ from .scrcpy_manager import (
     is_scrcpy_available,
     resolve_scrcpy_target,
 )
+from .settings_apply import SettingsApplyController
 from .settings_dialog import SettingsDialog
+from .settings_draft import capture_stream_changed, config_snapshot
 from .settings_store import load_config, save_config
 
 LOG = logging.getLogger(__name__)
@@ -416,6 +418,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._mouse_mode = config.input.default_pointer_mode == "mouse"
         self._input_mode = InputMode.LOCAL
         self._settings_dialog: SettingsDialog | None = None
+        self._settings_apply = SettingsApplyController(self)
         self._live_capture_timer: int | None = None
         self._live_capture_pending = None
         self._scrcpy = ScrcpySession(
@@ -722,6 +725,7 @@ class MainWindow(Adw.ApplicationWindow):
             LOG.exception("Failed to open about dialog")
 
     def _on_settings_closed(self, *_args) -> None:
+        self._settings_apply.cancel_pending()
         self._settings_dialog = None
 
     def _install_chrome_motion(self, widget: Gtk.Widget) -> None:
@@ -757,9 +761,40 @@ class MainWindow(Adw.ApplicationWindow):
         if self._mode in (MODE_NORMAL, MODE_FULLSCREEN):
             self._chrome.bump()
 
+    def cancel_settings_preview(self) -> None:
+        """Cancel debounced preview and pending capture restarts."""
+        self._settings_apply.cancel_pending()
+
+    def schedule_settings_preview(self, config: AppConfig) -> None:
+        """Debounced live preview while the settings dialog is open."""
+        self._settings_apply.schedule_live_preview(config)
+
+    def schedule_settings_revert(self, saved: AppConfig) -> None:
+        """Restore saved settings after cancel/close without blocking the dialog."""
+        self._settings_apply.schedule_revert(saved)
+
+    def commit_settings(
+        self,
+        config: AppConfig,
+        on_complete=None,
+    ) -> None:
+        """Persist settings on a worker thread, then apply on the GTK loop."""
+        self._settings_apply.commit_saved(config, on_complete)
+
+    def cancel_live_capture_apply(self) -> None:
+        if self._live_capture_timer is not None:
+            GLib.source_remove(self._live_capture_timer)
+            self._live_capture_timer = None
+        self._live_capture_pending = None
+
     def apply_settings_live(self, config: AppConfig) -> None:
+        """Apply settings without persisting (legacy entry for callers)."""
+        self.apply_settings_core(config)
+
+    def apply_settings_core(self, config: AppConfig) -> None:
         """Apply settings to the running app without writing config.json."""
-        prev_capture = self._config.capture
+        prev_config = config_snapshot(self._config)
+        prev_capture = prev_config.capture
         self._config = config
 
         self._chrome.set_enabled(config.window.chrome_auto_hide)
@@ -776,34 +811,47 @@ class MainWindow(Adw.ApplicationWindow):
             self._state["pip_opacity"] = config.window.pip.opacity
             self.set_opacity(config.window.pip.opacity)
 
-        self._update_shortcut_tooltips()
-        self._install_shortcuts()
+        if prev_config.shortcuts != config.shortcuts:
+            GLib.idle_add(self._install_shortcuts_idle)
+        else:
+            self._update_shortcut_tooltips()
         self._video.update_input_mode(self._input_mode)
 
         if self._capture.is_running():
-            if prev_capture != config.capture:
+            if capture_stream_changed(prev_capture, config.capture):
                 self._schedule_live_capture_apply(config.capture)
             else:
-                self._capture.with_config(config.capture)
+                self._capture.config = config.capture
         else:
             self._capture.config = config.capture
 
-        def apply_adb() -> None:
-            try:
-                self._adb.update_settings(
-                    wired_serial=config.adb.wired_serial,
-                    wireless_host=config.adb.wireless_host,
-                    wireless_port=config.adb.wireless_port,
-                    prefer_wired=config.input.prefer_wired_adb,
-                )
-            except Exception:
-                LOG.exception("Failed to apply ADB settings")
+        adb_changed = (
+            prev_config.adb != config.adb
+            or prev_config.input.prefer_wired_adb != config.input.prefer_wired_adb
+        )
+        if adb_changed:
+            adb_cfg = config_snapshot(config)
 
-        threading.Thread(
-            target=apply_adb,
-            daemon=True,
-            name="adb-settings-apply",
-        ).start()
+            def apply_adb() -> None:
+                try:
+                    self._adb.update_settings(
+                        wired_serial=adb_cfg.adb.wired_serial,
+                        wireless_host=adb_cfg.adb.wireless_host,
+                        wireless_port=adb_cfg.adb.wireless_port,
+                        prefer_wired=adb_cfg.input.prefer_wired_adb,
+                    )
+                except Exception:
+                    LOG.exception("Failed to apply ADB settings")
+
+            threading.Thread(
+                target=apply_adb,
+                daemon=True,
+                name="adb-settings-apply",
+            ).start()
+
+    def _install_shortcuts_idle(self) -> bool:
+        self._install_shortcuts()
+        return False
 
     def _schedule_live_capture_apply(self, capture_cfg) -> None:
         self._live_capture_pending = capture_cfg
@@ -819,11 +867,17 @@ class MainWindow(Adw.ApplicationWindow):
         pending = self._live_capture_pending
         self._live_capture_pending = None
         if pending is not None and self._capture.is_running():
-            self._capture.with_config(pending)
+            threading.Thread(
+                target=self._capture.with_config,
+                args=(pending,),
+                daemon=True,
+                name="capture-live-apply",
+            ).start()
         return False
 
     def _on_settings_saved(self, config: AppConfig) -> None:
-        self.apply_settings_live(config)
+        """Settings were persisted and applied by commit_settings."""
+        _ = config
 
     def toggle_keyboard_capture(self) -> None:
         if self._input_mode == InputMode.KEYBOARD:

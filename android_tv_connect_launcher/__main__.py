@@ -28,12 +28,40 @@ def _build_app_env() -> dict[str, str]:
 def _spawn_app(argv: list[str]) -> int:
     root = resolve_current_root()
     if root is None:
-        LOG.error("No installed app bundle found under %s", current_link())
+        msg = f"No installed app bundle found under {current_link()}"
+        LOG.error(msg)
+        _show_fatal_error(msg)
         return 1
 
     cmd = [sys.executable, "-m", "android_tv_connect", *argv]
     LOG.info("Launching app from %s", root)
-    return subprocess.call(cmd, env=_build_app_env())
+    try:
+        return subprocess.call(cmd, env=_build_app_env())
+    except OSError as exc:
+        msg = f"Failed to start Android TV Connect: {exc}"
+        LOG.error(msg)
+        _show_fatal_error(msg)
+        return 1
+
+
+def _show_fatal_error(message: str) -> None:
+    """Best-effort GUI error when the launcher cannot spawn the app."""
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return
+    try:
+        subprocess.run(
+            [
+                "zenity",
+                "--error",
+                "--title=Android TV Connect",
+                f"--text={message}",
+                "--width=420",
+            ],
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def _run_update_flow(*, apply: bool, force_check: bool) -> UpdateCheckResult:

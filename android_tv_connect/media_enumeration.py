@@ -59,7 +59,31 @@ def enumerate_v4l2_devices() -> list[VideoDeviceOption]:
     return options
 
 
-def _parse_pactl_sources(stdout: str) -> list[AudioSourceOption]:
+def _parse_pactl_sources_verbose(stdout: str) -> list[AudioSourceOption]:
+    """Parse ``pactl list sources`` blocks for Name + Description pairs."""
+    options: list[AudioSourceOption] = []
+    pending_name = ""
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Name:"):
+            pending_name = stripped.split(":", 1)[1].strip()
+            continue
+        if not stripped.startswith("Description:") or not pending_name:
+            continue
+        description = stripped.split(":", 1)[1].strip()
+        if not pending_name.endswith(".monitor"):
+            options.append(
+                AudioSourceOption(
+                    name=pending_name,
+                    description=description or pending_name,
+                )
+            )
+        pending_name = ""
+    return options
+
+
+def _parse_pactl_sources_short(stdout: str) -> list[AudioSourceOption]:
+    """Parse ``pactl list sources short`` (index, name, driver, format, state)."""
     options: list[AudioSourceOption] = []
     for line in stdout.splitlines():
         parts = line.split("\t")
@@ -68,8 +92,7 @@ def _parse_pactl_sources(stdout: str) -> list[AudioSourceOption]:
         name = parts[1].strip()
         if not name or name.endswith(".monitor"):
             continue
-        description = parts[-1].strip() if len(parts) >= 4 else name
-        options.append(AudioSourceOption(name=name, description=description))
+        options.append(AudioSourceOption(name=name, description=name))
     return options
 
 
@@ -84,7 +107,7 @@ def _parse_pw_cli_nodes(stdout: str) -> list[AudioSourceOption]:
         desc_match = re.search(r'node\.description\s*=\s*"([^"]+)"', line)
         if desc_match:
             current_desc = desc_match.group(1)
-        if "MediaClass" in line and "Audio/Source" in line and current_name:
+        if "media.class" in line and "Audio/Source" in line and current_name:
             if not current_name.endswith(".monitor"):
                 options.append(
                     AudioSourceOption(
@@ -97,21 +120,30 @@ def _parse_pw_cli_nodes(stdout: str) -> list[AudioSourceOption]:
     return options
 
 
-def enumerate_audio_sources() -> list[AudioSourceOption]:
-    """Return non-monitor audio input sources from pactl or PipeWire."""
+def _run_pactl(args: list[str]) -> subprocess.CompletedProcess[str] | None:
     try:
-        result = subprocess.run(
-            ["pactl", "list", "sources", "short"],
+        return subprocess.run(
+            ["pactl", *args],
             capture_output=True,
             text=True,
             timeout=3,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        result = None
+        return None
 
-    if result is not None and result.returncode == 0 and result.stdout.strip():
-        parsed = _parse_pactl_sources(result.stdout)
+
+def enumerate_audio_sources() -> list[AudioSourceOption]:
+    """Return non-monitor audio input sources from pactl or PipeWire."""
+    verbose = _run_pactl(["list", "sources"])
+    if verbose is not None and verbose.returncode == 0 and verbose.stdout.strip():
+        parsed = _parse_pactl_sources_verbose(verbose.stdout)
+        if parsed:
+            return parsed
+
+    short = _run_pactl(["list", "sources", "short"])
+    if short is not None and short.returncode == 0 and short.stdout.strip():
+        parsed = _parse_pactl_sources_short(short.stdout)
         if parsed:
             return parsed
 

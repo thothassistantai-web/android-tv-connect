@@ -26,6 +26,7 @@ _warned_fallback: set[str] = set()
 _CAPTURE_AUDIO_MARKERS = (
     "macrosilicon",
     "ms2109",
+    "usb3.0_capture",
     "usb3.0 capture",
 )
 _DISABLED_AUDIO = frozenset({"disabled", "off", "none"})
@@ -298,3 +299,12 @@ def capture_device_status(config: CaptureConfig | None = None, *, use_cache: boo
 def is_capture_device_available(config: CaptureConfig | None = None) -> bool:
     """Return True when the MS2109 USB device and a usable V4L2 node are present."""
     return capture_device_status(config, use_cache=True).available
+
+
+def list_viable_audio_sources(sources=None):
+    """Return all non-monitor PipeWire/Pulse inputs suitable for capture testing."""
+    from .media_enumeration import enumerate_audio_sources
+
+    if sources is not None:
+        return list(sources)
+    return enumerate_audio_sources()

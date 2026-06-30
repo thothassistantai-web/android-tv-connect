@@ -63,13 +63,37 @@ def _dbus_name_owned(name: str) -> bool:
         return False
 
 
+def _ui_process_argv(pid: int) -> str | None:
+  try:
+      raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+  except OSError:
+      return None
+  return raw.replace(b"\0", b" ").decode(errors="replace").strip()
+
+
 def _process_running() -> bool:
     result = subprocess.run(
         ["pgrep", "-f", "python3 -m android_tv_connect"],
         capture_output=True,
         text=True,
     )
-    return result.returncode == 0
+    if result.returncode != 0:
+        return False
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            pid = int(line)
+        except ValueError:
+            continue
+        argv = _ui_process_argv(pid)
+        if argv is None:
+            continue
+        if "--watch" in argv.split():
+            continue
+        return True
+    return False
 
 
 def is_ui_running() -> bool:

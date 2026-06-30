@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import time
+from subprocess import TimeoutExpired
 
 from .adb_client import AdbClient
 from .branding import APP_NAME, VERSION
@@ -54,7 +55,11 @@ def run_watch() -> int:
     missing_since: float | None = None
 
     while True:
-        ready = _both_ready(config)
+        try:
+            ready = _both_ready(config)
+        except TimeoutExpired:
+            LOG.warning("ADB connect timed out during watch poll")
+            ready = False
         running = is_ui_running()
         now = time.monotonic()
 

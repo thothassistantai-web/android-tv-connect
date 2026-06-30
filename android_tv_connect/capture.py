@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections.abc import Callable
 
@@ -71,6 +72,7 @@ class CapturePipeline:
         self._last_frame_at = 0.0
         self._reconnecting_since = 0.0
         self._user_paused = False
+        self._config_lock = threading.Lock()
 
     @staticmethod
     def _ensure_gst_init() -> None:
@@ -88,12 +90,22 @@ class CapturePipeline:
         self._state = state
         LOG.debug("capture state -> %s", state)
         if self._on_state_change:
+            GLib.idle_add(self._deliver_state_change, state)
+
+    def _deliver_state_change(self, state: str) -> bool:
+        if self._on_state_change:
             self._on_state_change(state)
+        return False
 
     def _emit_error(self, message: str) -> None:
         LOG.error("%s", message)
         if self._on_error:
+            GLib.idle_add(self._deliver_error, message)
+
+    def _deliver_error(self, message: str) -> bool:
+        if self._on_error:
             self._on_error(message)
+        return False
 
     def _video_pipeline_desc(self) -> str:
         cfg = self.config
@@ -242,8 +254,8 @@ class CapturePipeline:
         if result == Gst.StateChangeReturn.FAILURE:
             return False
         if result == Gst.StateChangeReturn.ASYNC:
-            _change, current, _pending = pipeline.get_state(5 * Gst.SECOND)
-            return current == state
+            _change, current, pending = pipeline.get_state(100 * Gst.MSECOND)
+            return current == state or pending == state
         return True
 
     def _start_pipelines(self) -> bool:
@@ -327,10 +339,16 @@ class CapturePipeline:
     def _schedule_reconnect(self, *, immediate: bool = False) -> None:
         if not self._running:
             return
+        GLib.idle_add(self._schedule_reconnect_idle, immediate)
+
+    def _schedule_reconnect_idle(self, immediate: bool) -> bool:
+        if not self._running:
+            return False
         self._cancel_reconnect()
         delay = 0 if immediate else self._reconnect_backoff_ms
         LOG.info("Scheduling capture reconnect in %d ms", delay)
         self._reconnect_source_id = GLib.timeout_add(max(0, delay), self._attempt_reconnect)
+        return False
 
     def _attempt_reconnect(self) -> bool:
         self._reconnect_source_id = None
@@ -500,14 +518,15 @@ class CapturePipeline:
 
     def with_config(self, config: CaptureConfig) -> None:
         """Hot-swap capture settings; restart pipelines when stream params change."""
-        params_changed = self._stream_params(self.config) != self._stream_params(config)
-        self.config = config
-        if not self._running:
-            return
-        self._reconnect_backoff_ms = self.config.reconnect_interval_ms
-        if params_changed and self._state == "playing":
-            self._teardown_pipelines()
-            self._set_state("reconnecting")
-            self._schedule_reconnect(immediate=True)
-        elif self._state != "playing":
-            self._schedule_reconnect(immediate=True)
+        with self._config_lock:
+            params_changed = self._stream_params(self.config) != self._stream_params(config)
+            self.config = config
+            if not self._running:
+                return
+            self._reconnect_backoff_ms = self.config.reconnect_interval_ms
+            if params_changed and self._state == "playing":
+                self._teardown_pipelines()
+                self._set_state("reconnecting")
+                self._schedule_reconnect(immediate=True)
+            elif self._state != "playing":
+                self._schedule_reconnect(immediate=True)

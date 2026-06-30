@@ -278,13 +278,27 @@ class AdbClient:
         return result.returncode == 0 and result.stdout.strip() == "device"
 
     def _run_adb(self, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["adb", *args],
-            capture_output=True,
-            text=True,
-            check=check,
-            timeout=5,
-        )
+        try:
+            return subprocess.run(
+                ["adb", *args],
+                capture_output=True,
+                text=True,
+                check=check,
+                timeout=5,
+            )
+        except subprocess.TimeoutExpired as exc:
+            if check:
+                raise
+            stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or b"").decode()
+            stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode()
+            if not stderr:
+                stderr = "adb command timed out"
+            return subprocess.CompletedProcess(
+                args=exc.cmd,
+                returncode=124,
+                stdout=stdout or "",
+                stderr=stderr,
+            )
 
     def _input_command(self, *args: str) -> bool:
         self._wait_for_rate_limit()

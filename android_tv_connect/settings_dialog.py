@@ -24,8 +24,14 @@ from .adb_settings import (
     parse_wireless_port,
     wireless_host_is_auto,
 )
+from .audio_source_test import (
+    AudioTestSource,
+    build_audio_test_queue,
+    next_queue_index,
+)
 from .branding import APP_NAME, VERSION
-from .config import AppConfig, ScrcpyConfig
+from .capture_device import list_viable_audio_sources, resolve_audio_device
+from .config import AppConfig, CaptureConfig, ScrcpyConfig
 from .media_enumeration import (
     AudioSourceOption,
     VideoDeviceOption,
@@ -48,7 +54,6 @@ from .settings_presets import (
     wireless_port_preset_index,
 )
 from .settings_draft import config_snapshot, configs_differ
-from .settings_store import save_config
 from .shortcuts import SHORTCUT_DEFINITIONS, SHORTCUT_HELP, validate_shortcut
 from .update_ui import check_for_updates
 
@@ -60,6 +65,8 @@ _MANUAL_LABEL = "Manual…"
 _CUSTOM_PORT_LABEL = "Custom…"
 _SEAMLESS_DOCS = "docs/SEAMLESS-UX.md"
 _LIVE_APPLY_DEBOUNCE_MS = 300
+_AUDIO_CONFIRM_DELAY_MS = 900
+_AUDIO_TEST_WARMUP_MS = 1200
 
 
 class SettingsDialog(Adw.Window):
@@ -75,8 +82,15 @@ class SettingsDialog(Adw.Window):
         self._saved_config = config_snapshot(config)
         self._on_saved = on_saved
         self._closing_saved = False
+        self._closed = False
         self._suppress_live_apply = 0
         self._live_apply_timer: int | None = None
+        self._audio_confirm_timer: int | None = None
+        self._audio_confirm_cycling = False
+        self._audio_confirm_dialog: Adw.MessageDialog | None = None
+        self._audio_line_test_active = False
+        self._audio_line_test_queue: list[AudioTestSource] = []
+        self._audio_line_test_index = 0
         self.set_title("Android TV Connect Settings")
         self.set_default_size(520, 640)
 
@@ -130,19 +144,30 @@ class SettingsDialog(Adw.Window):
         self._revert_and_close()
         return True
 
+    def _cancel_settings_async_ui(self) -> None:
+        self._cancel_live_apply_timer()
+        self._cancel_audio_confirm_timer()
+        self._dismiss_audio_confirm_dialog()
+        self._stop_audio_line_test()
+
     def _on_close_request(self, *_args) -> bool:
-        if not self._closing_saved:
-            self._host.apply_settings_live(self._saved_config)
+        if self._closing_saved or self._closed:
+            return False
+        self._closed = True
+        self._cancel_settings_async_ui()
+        self._host.cancel_settings_preview()
+        self._host.schedule_settings_revert(self._saved_config)
         return False
 
     def _revert_and_close(self) -> None:
-        if self._closing_saved:
-            self.close()
+        if self._closed:
             return
-        self._cancel_live_apply_timer()
-        self._host.apply_settings_live(self._saved_config)
-        self._closing_saved = True
+        saved = self._saved_config
+        self._closed = True
+        self._cancel_settings_async_ui()
+        self._host.cancel_settings_preview()
         self.close()
+        self._host.schedule_settings_revert(saved)
 
     def _on_cancel(self, *_args) -> None:
         self._revert_and_close()
@@ -463,6 +488,8 @@ class SettingsDialog(Adw.Window):
         wireless: list[WirelessDeviceOption],
         initial: bool,
     ) -> bool:
+        if self._closed:
+            return False
         self._suppress_live_apply += 1
         try:
             self._wired_devices = wired
@@ -549,6 +576,15 @@ class SettingsDialog(Adw.Window):
         self._audio_manual.set_visible(False)
         group.add(self._audio_manual)
 
+        test_row = Adw.ActionRow(title="Test audio sources")
+        test_row.set_subtitle(
+            "Try each input one by one. You confirm before the next source is tried."
+        )
+        self._audio_test_button = Gtk.Button(label="Start test")
+        self._audio_test_button.connect("clicked", self._on_start_audio_line_test)
+        test_row.add_suffix(self._audio_test_button)
+        group.add(test_row)
+
         refresh_row = Adw.ActionRow(title="Refresh capture devices")
         refresh_row.set_subtitle("Re-scan V4L2 nodes and audio sources")
         self._capture_refresh_button = Gtk.Button(label="Refresh")
@@ -616,6 +652,300 @@ class SettingsDialog(Adw.Window):
     def _on_audio_selection_changed(self, *_args) -> None:
         manual = self._audio_combo.get_selected() == self._audio_manual_index()
         self._audio_manual.set_visible(manual)
+        if self._suppress_live_apply > 0 or self._audio_confirm_cycling:
+            return
+        if self._audio_line_test_active:
+            self._stop_audio_line_test()
+        self._schedule_audio_confirm()
+
+    def _cancel_audio_confirm_timer(self) -> None:
+        if self._audio_confirm_timer is not None:
+            GLib.source_remove(self._audio_confirm_timer)
+            self._audio_confirm_timer = None
+
+    def _dismiss_audio_confirm_dialog(self) -> None:
+        if self._audio_confirm_dialog is not None:
+            self._audio_confirm_dialog.close()
+            self._audio_confirm_dialog = None
+
+    def _stop_audio_line_test(self) -> None:
+        self._audio_line_test_active = False
+        self._audio_line_test_queue = []
+        self._audio_line_test_index = 0
+        if hasattr(self, "_audio_test_button"):
+            self._audio_test_button.set_sensitive(True)
+            self._audio_test_button.set_label("Start test")
+
+    def _capture_config_for_audio_resolve(self) -> CaptureConfig:
+        width, height = self._resolution_value()
+        return CaptureConfig(
+            video_device=self._video_device_value(),
+            audio_device=self._audio_device_value(),
+            width=width,
+            height=height,
+            framerate=self._current_framerate(),
+        )
+
+    def _current_audio_test_source_fast(self) -> AudioTestSource | None:
+        """Resolve the current audio test source without subprocess I/O."""
+        selected = self._audio_combo.get_selected()
+        if selected == self._audio_manual_index():
+            manual = self._audio_manual.get_text().strip()
+            if not manual:
+                return None
+            return AudioTestSource(name=manual, label=manual)
+        if selected > 0:
+            source = self._audio_sources[selected - 1]
+            return AudioTestSource(
+                name=source.name,
+                label=source.description or source.name,
+            )
+        return None
+
+    def _current_audio_test_source(self) -> AudioTestSource | None:
+        selected = self._audio_combo.get_selected()
+        if selected <= 0:
+            resolved = resolve_audio_device(self._capture_config_for_audio_resolve())
+            if not resolved:
+                return None
+            return AudioTestSource(name=resolved, label=_AUTO_AUDIO_LABEL)
+        return self._current_audio_test_source_fast()
+
+    def _build_audio_test_queue_sync(self) -> list[AudioTestSource]:
+        manual = ""
+        if self._audio_combo.get_selected() == self._audio_manual_index():
+            manual = self._audio_manual.get_text().strip()
+        auto_resolved = resolve_audio_device(
+            replace(self._capture_config_for_audio_resolve(), audio_device="auto")
+        )
+        return build_audio_test_queue(
+            list_viable_audio_sources(self._audio_sources),
+            manual_name=manual,
+            include_auto_resolved=auto_resolved,
+            auto_label=_AUTO_AUDIO_LABEL,
+        )
+
+    def _audio_test_queue_for_settings(self) -> list[AudioTestSource]:
+        return self._build_audio_test_queue_sync()
+
+    def _resolve_audio_test_source_async(
+        self,
+        on_ready,
+        *,
+        thread_name: str = "audio-resolve",
+    ) -> None:
+        capture_cfg = self._capture_config_for_audio_resolve()
+
+        def work() -> None:
+            resolved = resolve_audio_device(capture_cfg)
+            source = (
+                AudioTestSource(name=resolved, label=_AUTO_AUDIO_LABEL)
+                if resolved
+                else None
+            )
+            GLib.idle_add(on_ready, source)
+
+        threading.Thread(target=work, daemon=True, name=thread_name).start()
+
+    def _build_audio_test_queue_async(self, on_ready) -> None:
+        capture_cfg = self._capture_config_for_audio_resolve()
+        manual = ""
+        if self._audio_combo.get_selected() == self._audio_manual_index():
+            manual = self._audio_manual.get_text().strip()
+        sources = list(self._audio_sources)
+
+        def work() -> None:
+            auto_resolved = resolve_audio_device(
+                replace(capture_cfg, audio_device="auto")
+            )
+            queue = build_audio_test_queue(
+                list_viable_audio_sources(sources),
+                manual_name=manual,
+                include_auto_resolved=auto_resolved,
+                auto_label=_AUTO_AUDIO_LABEL,
+            )
+            GLib.idle_add(on_ready, queue)
+
+        threading.Thread(
+            target=work,
+            daemon=True,
+            name="audio-test-queue",
+        ).start()
+
+    def _current_framerate(self) -> int:
+        selected = self._fps_combo.get_selected()
+        if 0 <= selected < len(FRAMERATE_PRESETS):
+            return FRAMERATE_PRESETS[selected]
+        return self._saved_config.capture.framerate
+
+    def _select_audio_source_name(self, name: str) -> None:
+        self._audio_confirm_cycling = True
+        self._suppress_live_apply += 1
+        try:
+            for index, source in enumerate(self._audio_sources, start=1):
+                if source.name == name:
+                    self._audio_combo.set_selected(index)
+                    self._audio_manual.set_visible(False)
+                    return
+            self._audio_combo.set_selected(self._audio_manual_index())
+            self._audio_manual.set_text(name)
+            self._audio_manual.set_visible(True)
+        finally:
+            self._suppress_live_apply -= 1
+            self._audio_confirm_cycling = False
+
+    def _apply_audio_source_for_test(self, source: AudioTestSource) -> None:
+        self._select_audio_source_name(source.name)
+        self._schedule_live_apply()
+        self._update_unsaved_indicator()
+
+    def _schedule_audio_confirm(self, *, warmup_ms: int | None = None) -> None:
+        self._cancel_audio_confirm_timer()
+        delay = warmup_ms if warmup_ms is not None else _AUDIO_CONFIRM_DELAY_MS
+        self._audio_confirm_timer = GLib.timeout_add(delay, self._prompt_audio_confirm)
+
+    def _on_start_audio_line_test(self, *_args) -> None:
+        self._cancel_audio_confirm_timer()
+        self._dismiss_audio_confirm_dialog()
+
+        def on_queue_ready(queue: list[AudioTestSource]) -> bool:
+            if self._closed:
+                return False
+            if not queue:
+                self._show_info(
+                    "No audio sources",
+                    "No PipeWire or PulseAudio input sources were found. "
+                    "Click Refresh capture devices and try again.",
+                )
+                return False
+
+            self._audio_line_test_active = True
+            self._audio_line_test_queue = queue
+            self._audio_line_test_index = 0
+            self._audio_test_button.set_sensitive(False)
+            self._audio_test_button.set_label("Testing…")
+            self._apply_audio_source_for_test(queue[0])
+            self._schedule_audio_confirm(warmup_ms=_AUDIO_TEST_WARMUP_MS)
+            return False
+
+        self._build_audio_test_queue_async(on_queue_ready)
+
+    def _line_test_progress_text(self) -> str:
+        if not self._audio_line_test_active or not self._audio_line_test_queue:
+            return ""
+        total = len(self._audio_line_test_queue)
+        current = min(self._audio_line_test_index + 1, total)
+        return f"Source {current} of {total}"
+
+    def _prompt_audio_confirm(self) -> bool:
+        self._audio_confirm_timer = None
+        if self._closed or self._closing_saved or self._audio_confirm_dialog is not None:
+            return False
+
+        if self._audio_line_test_active and self._audio_line_test_queue:
+            source = self._audio_line_test_queue[self._audio_line_test_index]
+            self._present_audio_confirm_dialog(source)
+            return False
+
+        source = self._current_audio_test_source_fast()
+        if source is not None:
+            self._present_audio_confirm_dialog(source)
+            return False
+
+        def on_resolved(resolved: AudioTestSource | None) -> bool:
+            if self._closed or self._closing_saved or self._audio_confirm_dialog is not None:
+                return False
+            if resolved is None:
+                self._stop_audio_line_test()
+                self._show_info(
+                    "Audio source unavailable",
+                    "Could not resolve the selected audio source. "
+                    "Choose a device from the list or enter a manual source name.",
+                )
+                return False
+            self._present_audio_confirm_dialog(resolved)
+            return False
+
+        self._resolve_audio_test_source_async(on_resolved)
+        return False
+
+    def _present_audio_confirm_dialog(self, source: AudioTestSource) -> None:
+        progress = self._line_test_progress_text()
+        progress_line = f"{progress}\n\n" if progress else ""
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading="Can you hear audio?",
+            body=(
+                f"{progress_line}"
+                f"Playback is using “{source.label}”.\n\n"
+                "Listen for HDMI capture audio from the TV. "
+                "Choose “No” to try the next source, or “Yes” to keep this one."
+            ),
+        )
+        dialog.add_response("next", "No")
+        dialog.add_response("yes", "Yes")
+        dialog.set_response_appearance("yes", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("yes")
+        dialog.set_close_response("yes")
+
+        def on_response(_dlg: Adw.MessageDialog, response: str) -> None:
+            self._audio_confirm_dialog = None
+            self._on_audio_confirm_response(response)
+
+        def on_destroy(_dlg: Adw.MessageDialog) -> None:
+            if self._audio_confirm_dialog is _dlg:
+                self._audio_confirm_dialog = None
+
+        dialog.connect("response", on_response)
+        dialog.connect("destroy", on_destroy)
+        self._audio_confirm_dialog = dialog
+        dialog.present()
+
+    def _on_audio_confirm_response(self, response: str) -> None:
+        if self._closed:
+            return
+        if response == "yes":
+            self._stop_audio_line_test()
+            return
+
+        if self._audio_line_test_active:
+            next_index = self._audio_line_test_index + 1
+            if next_index >= len(self._audio_line_test_queue):
+                self._stop_audio_line_test()
+                self._show_info(
+                    "No working source found",
+                    "Every available audio input was tried. "
+                    "Check HDMI cabling and TV volume, refresh devices, "
+                    "or enter a manual PipeWire source name.",
+                )
+                return
+            self._audio_line_test_index = next_index
+            source = self._audio_line_test_queue[next_index]
+            self._apply_audio_source_for_test(source)
+            self._schedule_audio_confirm(warmup_ms=_AUDIO_TEST_WARMUP_MS)
+            return
+
+        current = self._current_audio_test_source_fast()
+        if current is None:
+            return
+
+        def on_queue_ready(queue: list[AudioTestSource]) -> bool:
+            if self._closed:
+                return False
+            next_index = next_queue_index(queue, current.name)
+            if next_index is None:
+                self._show_info(
+                    "No more sources",
+                    "There are no further audio inputs to try. "
+                    "Enter a manual source name or click Start test to run all sources.",
+                )
+                return False
+            source = queue[next_index]
+            self._apply_audio_source_for_test(source)
+            self._schedule_audio_confirm(warmup_ms=_AUDIO_TEST_WARMUP_MS)
+            return False
+
+        self._build_audio_test_queue_async(on_queue_ready)
 
     def _refresh_capture_devices(self, *, initial: bool = False) -> None:
         self._capture_refresh_button.set_sensitive(False)
@@ -638,6 +968,8 @@ class SettingsDialog(Adw.Window):
         video: list[VideoDeviceOption],
         audio: list[AudioSourceOption],
     ) -> bool:
+        if self._closed:
+            return False
         self._suppress_live_apply += 1
         try:
             self._video_devices = video
@@ -851,6 +1183,8 @@ class SettingsDialog(Adw.Window):
         threading.Thread(target=work, daemon=True, name="update-check").start()
 
     def _show_update_result(self, result) -> bool:
+        if self._closed:
+            return False
         self._check_updates_button.set_sensitive(True)
         self._check_updates_button.set_label("Check")
 
@@ -904,6 +1238,8 @@ class SettingsDialog(Adw.Window):
         return False
 
     def _finish_install(self, result) -> bool:
+        if self._closed:
+            return False
         self._check_updates_button.set_sensitive(True)
         self._check_updates_button.set_label("Check")
         if result.error:
@@ -1002,7 +1338,7 @@ class SettingsDialog(Adw.Window):
             row.connect("notify::text", self._on_control_changed)
 
     def _on_control_changed(self, *_args) -> None:
-        if self._suppress_live_apply > 0:
+        if self._closed or self._suppress_live_apply > 0:
             return
         self._update_unsaved_indicator()
         self._schedule_live_apply()
@@ -1021,9 +1357,11 @@ class SettingsDialog(Adw.Window):
 
     def _do_live_apply(self) -> bool:
         self._live_apply_timer = None
+        if self._closed:
+            return False
         draft = self._assemble_config(strict=False, live=True)
         if draft is not None:
-            self._host.apply_settings_live(draft)
+            self._host.schedule_settings_preview(draft)
         return False
 
     def _update_unsaved_indicator(self) -> None:
@@ -1156,17 +1494,15 @@ class SettingsDialog(Adw.Window):
         )
 
     def _on_save(self, *_args) -> None:
+        if self._closed:
+            return
+        self._cancel_settings_async_ui()
         updated = self._assemble_config(strict=True, live=False)
         if updated is None:
             return
-        save_config(updated)
-        self._cancel_live_apply_timer()
-        self._closing_saved = True
         callback = self._on_saved
+        self._closing_saved = True
+        self._closed = True
+        self._host.cancel_settings_preview()
         self.close()
-        GLib.idle_add(self._deliver_saved_config, callback, updated)
-
-    @staticmethod
-    def _deliver_saved_config(callback, config: AppConfig) -> bool:
-        callback(config)
-        return False
+        self._host.commit_settings(updated, callback)

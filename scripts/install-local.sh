@@ -126,7 +126,24 @@ set -euo pipefail
 export ATV_CONNECT_HOME="${DATA_ROOT}"
 LAUNCHER_ROOT="${launcher_root}"
 export PYTHONPATH="\${LAUNCHER_ROOT}\${PYTHONPATH:+:\${PYTHONPATH}}"
-exec python3 -m android_tv_connect_launcher "\$@"
+
+_show_launch_error() {
+    local msg="\$1"
+    if command -v zenity >/dev/null 2>&1 && [[ -n "\${DISPLAY:-\${WAYLAND_DISPLAY:-}}" ]]; then
+        zenity --error --title="Android TV Connect" --text="\$msg" --width=420 2>/dev/null || true
+    elif command -v notify-send >/dev/null 2>&1; then
+        notify-send "Android TV Connect" "\$msg" 2>/dev/null || true
+    fi
+    printf '%s\n' "\$msg" >&2
+}
+
+if ! python3 -m android_tv_connect_launcher "\$@"; then
+    code=\$?
+    _show_launch_error "Android TV Connect failed to start (exit \$code).
+
+Run atv-connect in a terminal for details, or check journalctl --user -t atv-connect."
+    exit "\$code"
+fi
 EOF
     chmod +x "${BIN_DIR}/atv-connect"
 

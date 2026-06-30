@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sys
+import subprocess
 import threading
 import time
 import unittest
@@ -56,6 +57,14 @@ class AdbReconnectTests(unittest.TestCase):
         client._notify_connection_change(False)
         client._notify_connection_change(True)
         self.assertEqual(events, [True, False, True])
+
+    def test_run_adb_timeout_returns_failure_instead_of_raising(self) -> None:
+        client = AdbClient()
+        with patch("android_tv_connect.adb_client.subprocess.run") as run:
+            run.side_effect = subprocess.TimeoutExpired(cmd=["adb", "connect"], timeout=5)
+            result = client._run_adb(["connect", "192.168.1.1:5555"], check=False)
+        self.assertEqual(result.returncode, 124)
+        self.assertIn("timed out", result.stderr.lower())
 
 
 if __name__ == "__main__":

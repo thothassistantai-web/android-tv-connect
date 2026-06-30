@@ -22,12 +22,41 @@ class SavedGeometry:
 
 WINDOW_STATE_PATH = CONFIG_DIR / "window.json"
 
+PIP_OPACITY_MIN = 0.25
+PIP_OPACITY_MAX = 1.0
+
 HEADER_HEIGHT = 40
 VIDEO_ASPECT = 16 / 9
+MIN_NORMAL_WIDTH = 320
+MIN_VIDEO_HEIGHT = 180
+
+# Gdk.ToplevelState tiling flags (GDK 4; stable bit positions).
+_TOPLEVEL_STATE_TILED = 1 << 4
+_TOPLEVEL_STATE_LEFT_TILED = 1 << 5
+_TOPLEVEL_STATE_RIGHT_TILED = 1 << 6
+_TOPLEVEL_STATE_TOP_TILED = 1 << 7
+_TOPLEVEL_STATE_BOTTOM_TILED = 1 << 8
+TILED_TOPLEVEL_STATE_MASK = (
+    _TOPLEVEL_STATE_TILED
+    | _TOPLEVEL_STATE_LEFT_TILED
+    | _TOPLEVEL_STATE_RIGHT_TILED
+    | _TOPLEVEL_STATE_TOP_TILED
+    | _TOPLEVEL_STATE_BOTTOM_TILED
+)
+
+
+def is_tiled_toplevel_state(state: int) -> bool:
+    """Return True when any GDK top-level tiling flag is set."""
+    return bool(state & TILED_TOPLEVEL_STATE_MASK)
+
+
+def min_normal_window_size(header: int = HEADER_HEIGHT) -> tuple[int, int]:
+    """Smallest normal-mode size that still shows a usable video area."""
+    return MIN_NORMAL_WIDTH, window_height_for_width(MIN_NORMAL_WIDTH, header)
 
 
 def video_area_height(width: int) -> int:
-    return max(180, int(width / VIDEO_ASPECT))
+    return max(MIN_VIDEO_HEIGHT, int(width / VIDEO_ASPECT))
 
 
 def window_height_for_width(width: int, header: int = HEADER_HEIGHT) -> int:
@@ -90,6 +119,7 @@ def load_window_state() -> dict[str, Any]:
         ),
         "pip_corner": cfg.pip.corner,
         "pip_opacity": cfg.pip.opacity,
+        "pip_keep_above": cfg.pip.keep_above_default,
         "fullscreen_monitor": cfg.fullscreen.monitor,
     }
     if not WINDOW_STATE_PATH.exists():
@@ -105,7 +135,10 @@ def load_window_state() -> dict[str, Any]:
         "normal": _dict_to_geometry(raw.get("normal", {}), defaults["normal"]),
         "pip": _dict_to_geometry(raw.get("pip", {}), defaults["pip"]),
         "pip_corner": raw.get("pip_corner", defaults["pip_corner"]),
-        "pip_opacity": float(raw.get("pip_opacity", defaults["pip_opacity"])),
+        "pip_opacity": clamp_pip_opacity(
+            float(raw.get("pip_opacity", defaults["pip_opacity"]))
+        ),
+        "pip_keep_above": bool(raw.get("pip_keep_above", defaults["pip_keep_above"])),
         "fullscreen_monitor": int(
             raw.get("fullscreen_monitor", defaults["fullscreen_monitor"])
         ),
@@ -120,9 +153,31 @@ def save_window_state(state: dict[str, Any]) -> None:
         "pip": _geometry_to_dict(state["pip"]),
         "pip_corner": state.get("pip_corner", "bottom-right"),
         "pip_opacity": state.get("pip_opacity", 1.0),
+        "pip_keep_above": state.get("pip_keep_above", True),
         "fullscreen_monitor": state.get("fullscreen_monitor", 0),
     }
     WINDOW_STATE_PATH.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def clamp_pip_opacity(value: float) -> float:
+    """Keep PiP opacity within the visible range (25%–100%)."""
+    return max(PIP_OPACITY_MIN, min(PIP_OPACITY_MAX, float(value)))
+
+
+def window_xy(window) -> tuple[int, int]:
+    """Return window position, or (0, 0) when unavailable."""
+    get_x = getattr(window, "get_x", None)
+    get_y = getattr(window, "get_y", None)
+    if callable(get_x) and callable(get_y):
+        return int(get_x()), int(get_y())
+    return 0, 0
+
+
+def window_move(window, x: int, y: int) -> None:
+    """Move a Gtk.Window when the toolkit exposes move()."""
+    move = getattr(window, "move", None)
+    if callable(move):
+        move(x, y)
 
 
 def pip_corner_position(

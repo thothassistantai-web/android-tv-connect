@@ -310,20 +310,11 @@ def list_viable_audio_sources(sources=None):
     return enumerate_audio_sources()
 
 
-# MS2109 exposes 48 kHz stereo S16LE PCM after the kernel usb-audio quirk
-# (5.8+). Without explicit caps, pipewiresrc often negotiates mono float and
-# playback sounds like crackling/static.
-_MS2109_AUDIO_CAPS = "audio/x-raw,format=S16LE,rate=48000,channels=2"
-_MS2109_AUDIO_QUEUE = (
-    "queue max-size-buffers=60 max-size-time=200000000 leaky=downstream"
-)
+# Stable Pulse/PipeWire application name for capture playback. Without this,
+# GStreamer uses "__main__.py" and stream-restore can re-apply a saved mute.
+_ATV_CAPTURE_PLAYBACK_APP_NAME = "Android-TV-Connect-Capture"
 
 _pipewiresrc_available: bool | None = None
-
-
-def ms2109_audio_caps() -> str:
-    """GStreamer caps string for MacroSilicon HDMI capture audio."""
-    return _MS2109_AUDIO_CAPS
 
 
 def pipewiresrc_available() -> bool:
@@ -346,15 +337,67 @@ def pipewiresrc_available() -> bool:
 
 
 def build_audio_source_segment(device: str) -> str:
-    """Return the GStreamer launch prefix for HDMI capture audio input."""
-    tail = (
-        f"{_MS2109_AUDIO_QUEUE} ! "
-        f"audioconvert ! audioresample ! {_MS2109_AUDIO_CAPS} ! "
+    """Return the GStreamer launch prefix for HDMI capture audio input.
+
+    Capture playback uses pulsesrc (v1.1.7). pipewiresrc remains available
+    for diagnostics via scripts/audio-source-probe.py only.
+    """
+    device_prop = f" device={device}" if device else ""
+    return (
+        f"pulsesrc name=audiosrc{device_prop} ! "
+        f"audioconvert ! audioresample ! "
     )
-    if pipewiresrc_available():
-        return (
-            f"pipewiresrc name=audiosrc target-object={device} "
-            f"provide-clock=false do-timestamp=true ! "
-            f"{tail}"
+
+
+def build_audio_sink_segment() -> str:
+    """Return explicit pulsesink for capture playback (not autoaudiosink)."""
+    return "pulsesink name=audiosink mute=false sync=false"
+
+
+def build_live_audio_pipeline(device: str, *, sink: str = "") -> str:
+    """Full live capture playback pipeline: pulsesrc → default pulsesink."""
+    name = (device or "").strip()
+    sink_props = "mute=false sync=false"
+    if (sink or "").strip():
+        sink_props = f"device={sink.strip()} {sink_props}"
+    return (
+        f"pulsesrc name=audiosrc device={name} ! "
+        f"audioconvert ! audioresample ! "
+        f"pulsesink name=audiosink {sink_props}"
+    )
+
+
+def ensure_capture_playback_unmuted() -> None:
+    """Unmute PipeWire/Pulse sink-inputs owned by this process."""
+    import os
+    import subprocess
+
+    pid = str(os.getpid())
+    try:
+        result = subprocess.run(
+            ["pactl", "list", "sink-inputs"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
         )
-    return f"pulsesrc name=audiosrc device={device} ! {tail}"
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    if result.returncode != 0:
+        return
+
+    current_id: str | None = None
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Sink Input #"):
+            current_id = stripped.split("#", 1)[1]
+            continue
+        if current_id is None:
+            continue
+        if stripped == f'application.process.id = "{pid}"':
+            subprocess.run(
+                ["pactl", "set-sink-input-mute", current_id, "0"],
+                timeout=5,
+                check=False,
+            )
+            current_id = None

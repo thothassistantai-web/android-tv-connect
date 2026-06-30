@@ -50,6 +50,7 @@ class PipWindowConfig:
     corner: str = "bottom-right"
     margin_px: int = 16
     opacity: float = 1.0
+    keep_above_default: bool = True
     soft_bar_visible: bool = True
     soft_bar_auto_hide: bool = True
     min_width: int = 320

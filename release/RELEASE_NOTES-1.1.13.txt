@@ -1,0 +1,6 @@
+Android TV Connect 1.1.13
+=========================
+
+- Picture-in-Picture is now truly borderless: video fills the window edge-to-edge with no OS title bar or drag handle.
+- Minimize, maximize, and close controls float over the video in the top-right corner and fade in on hover (auto-hide can be toggled in Settings → Window).
+- Drag the PiP by clicking and dragging anywhere on the video; left-click without dragging still restores the main window.

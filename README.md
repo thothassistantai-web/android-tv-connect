@@ -91,7 +91,23 @@ systemctl --user restart android-tv-connect-watch
 journalctl --user -u android-tv-connect-watch -f
 ```
 
-The watcher runs `atv-connect --watch`, which checks for updates then starts the device poller.
+The watcher runs `atv-connect --watch`, which checks for updates then starts the device poller. It auto-launches the UI when capture + ADB are ready at login, and after an unexpected crash. Closing the window (X), **File → Quit**, or **Ctrl+Q** keeps the app closed for the rest of that watcher session.
+
+**Quit without relaunch**
+
+```bash
+atv-connect --quit
+```
+
+This suppresses auto-launch until you start the app manually (`atv-connect`) or restart the watcher:
+
+```bash
+systemctl --user restart android-tv-connect-watch
+```
+
+**Keep watch for boot/login autostart only**
+
+Leave the watcher enabled (`systemctl --user enable android-tv-connect-watch`). Close the app normally when you are done for the session; it will not reopen until the next login (when the watcher restarts) or until you run `atv-connect` again.
 
 ### Updates
 

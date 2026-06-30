@@ -8,11 +8,11 @@ from unittest.mock import patch
 
 sys.path.insert(0, ".")
 from android_tv_connect.capture_device import (
+    build_audio_sink_segment,
     build_audio_source_segment,
     discover_audio_device,
     discover_video_device,
     is_capture_audio_source,
-    pipewiresrc_available,
     resolve_audio_device,
     resolve_video_device,
 )
@@ -75,29 +75,24 @@ class CaptureDeviceTests(unittest.TestCase):
                     "alsa_input.usb-MACROSILICON_USB3.0_Capture-02.analog-stereo",
                 )
 
-    def test_build_audio_source_prefers_pipewiresrc(self) -> None:
-        with patch(
-            "android_tv_connect.capture_device.pipewiresrc_available",
-            return_value=True,
-        ):
-            segment = build_audio_source_segment(
-                "alsa_input.usb-MACROSILICON_USB3.0_Capture-02.analog-stereo"
-            )
-        self.assertIn("pipewiresrc", segment)
-        self.assertIn("target-object=", segment)
-        self.assertIn("provide-clock=false", segment)
-        self.assertIn("format=S16LE,rate=48000,channels=2", segment)
-        self.assertIn("leaky=downstream", segment)
-
-    def test_build_audio_source_falls_back_to_pulsesrc(self) -> None:
-        with patch(
-            "android_tv_connect.capture_device.pipewiresrc_available",
-            return_value=False,
-        ):
-            segment = build_audio_source_segment("custom.source")
+    def test_build_audio_source_uses_pulsesrc(self) -> None:
+        segment = build_audio_source_segment(
+            "alsa_input.usb-MACROSILICON_USB3.0_Capture-02.analog-stereo"
+        )
         self.assertIn("pulsesrc", segment)
-        self.assertIn("device=custom.source", segment)
-        self.assertIn("format=S16LE,rate=48000,channels=2", segment)
+        self.assertIn(
+            "device=alsa_input.usb-MACROSILICON_USB3.0_Capture-02.analog-stereo",
+            segment,
+        )
+        self.assertIn("audioconvert", segment)
+        self.assertIn("audioresample", segment)
+        self.assertNotIn("pipewiresrc", segment)
+
+    def test_build_audio_sink_uses_explicit_pulsesink(self) -> None:
+        segment = build_audio_sink_segment()
+        self.assertIn("pulsesink", segment)
+        self.assertIn("mute=false", segment)
+        self.assertNotIn("autoaudiosink", segment)
 
 
 if __name__ == "__main__":

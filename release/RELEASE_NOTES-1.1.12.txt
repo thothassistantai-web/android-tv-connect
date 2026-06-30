@@ -1,0 +1,7 @@
+Android TV Connect 1.1.12
+=========================
+
+- MPRIS media controls: the app registers as ``org.mpris.MediaPlayer2.androidtvconnect`` on the session D-Bus while running, so Cosmic/GNOME media overlays, ``playerctl``, and keyboard media keys can show and control HDMI capture playback.
+- System UI shows **Android TV Connect** as the player identity with track title **HDMI Capture** and artist **Onn Stick**; play/pause from the overlay pauses or resumes capture audio (and video pipeline).
+- Volume property is supported when the capture audio pipeline is active (maps to GStreamer ``pulsesink`` volume).
+- Uses existing PyGObject/GIO D-Bus bindings — no new pip packages. Cosmic uses standard MPRIS (not ``org.freedesktop.portal.MediaSession``).

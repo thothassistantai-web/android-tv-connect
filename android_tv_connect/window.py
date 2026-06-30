@@ -36,12 +36,17 @@ from .connection_ui import (
 from .control_bar import ControlBarShell
 from .geometry import (
     SavedGeometry,
+    clamp_pip_opacity,
     compute_initial_geometry,
+    is_tiled_toplevel_state,
     load_window_state,
-    pip_corner_position,
+    min_normal_window_size,
     save_window_state,
     window_height_for_width,
+    window_move,
+    window_xy,
 )
+from .pip_window import PipWindow
 from .input_controller import (
     InputMode,
     MODE_LABELS,
@@ -63,7 +68,15 @@ from .settings_apply import SettingsApplyController
 from .settings_dialog import SettingsDialog
 from .settings_draft import capture_stream_changed, config_snapshot
 from .settings_store import load_config, save_config
+from .singleton import note_user_quit
 from .diagnostics_server import AppDiagnosticsBackend, DiagnosticsServer
+from .mpris_controller import (
+    CaptureMprisController,
+    DEFAULT_STREAM_ARTIST,
+    DEFAULT_STREAM_TITLE,
+    MprisHandlers,
+    PLAYBACK_STOPPED,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -77,22 +90,11 @@ CAPTURE_W = 1920
 CAPTURE_H = 1080
 
 
-def _set_window_keep_above(window: Gtk.Window, above: bool) -> None:
-    _ = (window, above)
-
-
-def _window_xy(window: Gtk.Window) -> tuple[int, int]:
-    get_x = getattr(window, "get_x", None)
-    get_y = getattr(window, "get_y", None)
-    if callable(get_x) and callable(get_y):
-        return int(get_x()), int(get_y())
-    return 0, 0
-
-
-def _window_move(window: Gtk.Window, x: int, y: int) -> None:
-    move = getattr(window, "move", None)
-    if callable(move):
-        move(x, y)
+def _window_toplevel(window: Gtk.Window) -> Gdk.Toplevel | None:
+    surface = window.get_surface()
+    if isinstance(surface, Gdk.Toplevel):
+        return surface
+    return None
 
 
 class VideoSurface(Gtk.Box):
@@ -413,9 +415,10 @@ class MainWindow(Adw.ApplicationWindow):
         self._state = load_window_state()
         self._mode = self._state["last_mode"]
         self._save_timer: int | None = None
-        self._pip_bar_hide_timer: int | None = None
         self._aspect_adjusting = False
+        self._wm_geometry_managed = False
         self._saved_normal: SavedGeometry | None = None
+        self._pip_window: PipWindow | None = None
         self._mouse_mode = config.input.default_pointer_mode == "mouse"
         self._input_mode = InputMode.LOCAL
         self._settings_dialog: SettingsDialog | None = None
@@ -471,21 +474,6 @@ class MainWindow(Adw.ApplicationWindow):
         self._compact_header = CompactHeader(self._headerbar, self)
         self._toolbar.add_top_bar(self._headerbar)
 
-        self._pip_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        self._pip_bar.add_css_class("pip-grip-bar")
-        self._pip_bar.set_visible(False)
-        self._pip_grip = Gtk.Label(label="≡≡≡ drag ≡≡≡")
-        self._pip_grip.add_css_class("dim-label")
-        self._pip_grip.set_hexpand(True)
-        self._pip_grip.set_halign(Gtk.Align.CENTER)
-        pip_expand = Gtk.Button(icon_name="view-fullscreen-symbolic")
-        pip_expand.set_has_frame(False)
-        pip_expand.set_tooltip_text("Exit Picture-in-Picture (Shift+F1)")
-        pip_expand.connect("clicked", lambda *_: self.toggle_pip())
-        self._pip_bar.append(self._pip_grip)
-        self._pip_bar.append(pip_expand)
-        root.append(self._pip_bar)
-
         self._content_overlay = Gtk.Overlay()
         self._content_overlay.set_vexpand(True)
         self._content_overlay.set_hexpand(True)
@@ -526,6 +514,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._diagnostics_backend = AppDiagnosticsBackend(self)
 
         self.connect("close-request", self._on_close_request)
+        self.connect("realize", self._on_realize)
+        self.connect("notify::maximized", self._on_wm_geometry_changed)
         self.connect("notify::width", self._on_size_changed)
         self.connect("notify::height", self._on_size_changed)
         self.connect("notify::is-active", self._on_focus_changed)
@@ -538,9 +528,16 @@ class MainWindow(Adw.ApplicationWindow):
         self._update_status_dots()
         GLib.timeout_add_seconds(2, self._status_tick)
 
-        self._capture.attach_video_widget(self._video.video_host)
+        target = (
+            self._pip_window.picture
+            if self._pip_window is not None
+            else self._video.video_host
+        )
+        self._capture.attach_video_widget(target)
         if not self._capture.start():
             self._video.set_status("Capture device not ready")
+
+        self._register_mpris_handlers()
 
         self._control_shell.set_mouse_mode(self._mouse_mode)
         self.set_input_mode(InputMode.LOCAL, source="init")
@@ -755,11 +752,6 @@ class MainWindow(Adw.ApplicationWindow):
         save_config(self._config)
 
     def bump_chrome(self) -> None:
-        if self._mode == MODE_PIP:
-            if self.is_active():
-                self._control_shell.force_show()
-                self._cancel_pip_hide()
-            return
         if self._mode in (MODE_NORMAL, MODE_FULLSCREEN):
             self._chrome.bump()
 
@@ -809,9 +801,10 @@ class MainWindow(Adw.ApplicationWindow):
         self._mouse_mode = config.input.default_pointer_mode == "mouse"
         self._control_shell.set_mouse_mode(self._mouse_mode)
 
-        if self._mode == MODE_PIP:
+        if self._mode == MODE_PIP and self._pip_window is not None:
             self._state["pip_opacity"] = config.window.pip.opacity
-            self.set_opacity(config.window.pip.opacity)
+            self._pip_window.update_opacity(config.window.pip.opacity)
+            self._pip_window.update_config(config.window.pip)
 
         if prev_config.shortcuts != config.shortcuts:
             GLib.idle_add(self._install_shortcuts_idle)
@@ -1132,7 +1125,61 @@ class MainWindow(Adw.ApplicationWindow):
             device = self._capture.effective_video_device
             hint = f" ({device})" if device else ""
             self._video.set_status(f"Capture reconnecting{hint}…")
+        if self._pip_window is not None:
+            self._pip_window.set_status(self._video_status_text())
         self._update_status_dots()
+        self._sync_mpris_from_capture(state)
+
+    def _register_mpris_handlers(self) -> None:
+        app = self.get_application()
+        if not isinstance(app, AndroidTvApp):
+            return
+        app.mpris.set_handlers(
+            MprisHandlers(
+                on_play=self._mpris_play,
+                on_pause=self._mpris_pause,
+                on_raise=self._mpris_raise,
+                get_volume=self._capture.get_audio_volume,
+                set_volume=self._capture.set_audio_volume,
+            )
+        )
+        app.mpris.set_metadata(DEFAULT_STREAM_TITLE, DEFAULT_STREAM_ARTIST)
+        self._sync_mpris_from_capture(self._capture.state)
+
+    def _clear_mpris_handlers(self) -> None:
+        app = self.get_application()
+        if not isinstance(app, AndroidTvApp):
+            return
+        app.mpris.clear_handlers()
+        app.mpris.set_playback_status(PLAYBACK_STOPPED)
+
+    def _sync_mpris_from_capture(self, state: str) -> None:
+        app = self.get_application()
+        if not isinstance(app, AndroidTvApp):
+            return
+        app.mpris.sync_from_capture(state, user_paused=self._capture.user_paused)
+        volume = self._capture.get_audio_volume()
+        if volume is not None:
+            app.mpris.set_volume(volume)
+
+    def _mpris_play(self) -> None:
+        if self._capture.state != "playing":
+            self._capture.resume_by_user()
+            if self._capture.state != "playing":
+                self._video.set_status("Reconnecting capture…")
+            self._update_status_dots()
+
+    def _mpris_pause(self) -> None:
+        if self._capture.state == "playing":
+            self._capture.pause_by_user()
+            self._video.set_status("Capture paused — click Capture to resume")
+            self._update_status_dots()
+
+    def _mpris_raise(self) -> None:
+        if self._pip_window is not None:
+            self._pip_window.present()
+        else:
+            self.present()
 
     def _on_capture_usb_unplugged(self) -> None:
         GLib.idle_add(self._show_capture_usb_dialog)
@@ -1175,7 +1222,10 @@ class MainWindow(Adw.ApplicationWindow):
         return False
 
     def _on_close_request(self, *_args) -> bool:
+        if self._pip_window is not None:
+            self._exit_pip(restore_main=False)
         self._persist_geometry()
+        self._clear_mpris_handlers()
         self._diagnostics_backend.shutdown()
         self._scrcpy.stop()
         self._capture.stop()
@@ -1184,6 +1234,61 @@ class MainWindow(Adw.ApplicationWindow):
         if isinstance(app, AndroidTvApp):
             app._on_window_destroy()
         return False
+
+    def _on_realize(self, *_args) -> None:
+        toplevel = _window_toplevel(self)
+        if toplevel is not None:
+            toplevel.connect("state-changed", self._on_toplevel_state_changed)
+        self._sync_normal_size_constraints()
+
+    def _on_toplevel_state_changed(self, _toplevel, _state: Gdk.ToplevelState) -> None:
+        self._on_wm_geometry_changed(self, None)
+
+    def _on_wm_geometry_changed(self, _window, _pspec) -> None:
+        if self._mode != MODE_NORMAL:
+            return
+        was_managed = getattr(self, "_wm_geometry_managed", False)
+        managed = self._is_wm_managed_geometry()
+        self._wm_geometry_managed = managed
+        self._sync_normal_size_constraints()
+        if was_managed and not managed:
+            self._maybe_lock_aspect()
+
+    def _is_tiled(self) -> bool:
+        toplevel = _window_toplevel(self)
+        if toplevel is None:
+            return False
+        return is_tiled_toplevel_state(int(toplevel.get_state()))
+
+    def _is_wm_managed_geometry(self) -> bool:
+        """True when the compositor owns size/position (tile, maximize, fullscreen)."""
+        if self._mode == MODE_FULLSCREEN:
+            return True
+        if self._mode != MODE_NORMAL:
+            return False
+        return self.is_maximized() or self._is_tiled()
+
+    def _sync_normal_size_constraints(self) -> None:
+        if self._mode == MODE_NORMAL and not self._is_wm_managed_geometry():
+            min_w, min_h = min_normal_window_size()
+            self.set_size_request(min_w, min_h)
+        else:
+            self.set_size_request(-1, -1)
+
+    def _restore_normal_geometry(self, geo: SavedGeometry, *, initial: bool = False) -> None:
+        """Apply saved normal-mode size/position without fighting WM tile/maximize."""
+        _ = initial
+        if geo.x < 0 or geo.y < 0:
+            geo = compute_initial_geometry(self.get_display())
+        self.set_default_size(geo.width, geo.height)
+        if self._is_wm_managed_geometry():
+            return
+        if geo.maximized:
+            self.maximize()
+            return
+        self.unmaximize()
+        nx, ny = geo.x, geo.y
+        GLib.idle_add(lambda x=nx, y=ny: (window_move(self, x, y), False)[1])
 
     def _on_size_changed(self, _window, pspec) -> None:
         if pspec.name == "width":
@@ -1194,7 +1299,7 @@ class MainWindow(Adw.ApplicationWindow):
         if (
             not self._config.window.aspect_ratio_locked
             or self._mode != MODE_NORMAL
-            or self.is_maximized()
+            or self._is_wm_managed_geometry()
             or self._aspect_adjusting
         ):
             return
@@ -1221,16 +1326,19 @@ class MainWindow(Adw.ApplicationWindow):
         self._save_timer = None
         if self._mode == MODE_FULLSCREEN:
             return False
+        wm_managed = self._mode == MODE_NORMAL and self._is_wm_managed_geometry()
         geo = SavedGeometry(
             width=self.get_width(),
             height=self.get_height(),
-            x=_window_xy(self)[0],
-            y=_window_xy(self)[1],
-            maximized=self.is_maximized(),
+            x=window_xy(self)[0],
+            y=window_xy(self)[1],
+            maximized=self.is_maximized() if self._mode == MODE_NORMAL else False,
         )
-        if self._mode == MODE_PIP:
+        if self._mode == MODE_PIP and self._pip_window is not None:
             self._state["pip"] = geo
-        else:
+        elif self._mode == MODE_NORMAL:
+            if wm_managed:
+                geo = replace(geo, maximized=False)
             self._state["normal"] = geo
         self._state["last_mode"] = self._mode
         save_window_state(self._state)
@@ -1244,34 +1352,92 @@ class MainWindow(Adw.ApplicationWindow):
             self._video.update_input_mode(self._input_mode)
             self._check_hotplug()
 
-        if self._mode != MODE_PIP:
-            return
-        if self.is_active():
-            self._control_shell.force_show()
-            self._cancel_pip_hide()
-        elif self._config.window.pip.soft_bar_auto_hide:
-            self._schedule_pip_hide()
-
-    def _schedule_pip_hide(self) -> None:
-        self._cancel_pip_hide()
-        self._pip_bar_hide_timer = GLib.timeout_add(2000, self._hide_pip_bar)
-
-    def _cancel_pip_hide(self) -> None:
-        if self._pip_bar_hide_timer is not None:
-            GLib.source_remove(self._pip_bar_hide_timer)
-            self._pip_bar_hide_timer = None
-
-    def _hide_pip_bar(self) -> bool:
-        self._pip_bar_hide_timer = None
-        if self._mode == MODE_PIP and not self.is_active():
-            self._control_shell.hide_auto()
-        return False
-
     def toggle_pip(self) -> None:
         if self._mode == MODE_PIP:
-            self._apply_mode(MODE_NORMAL)
+            self._exit_pip()
         else:
-            self._apply_mode(MODE_PIP)
+            self._enter_pip()
+
+    def _enter_pip(self) -> None:
+        if self._mode == MODE_FULLSCREEN:
+            self.unfullscreen()
+        if self._mode != MODE_PIP:
+            self._saved_normal = SavedGeometry(
+                self.get_width(),
+                self.get_height(),
+                *window_xy(self),
+                self.is_maximized(),
+            )
+            if self._mode == MODE_NORMAL:
+                self._persist_geometry()
+
+        self._mode = MODE_PIP
+        self._state["last_mode"] = MODE_PIP
+        self._compact_header.set_pip_active(True)
+
+        pip_cfg = self._config.window.pip
+        opacity = clamp_pip_opacity(self._state.get("pip_opacity", pip_cfg.opacity))
+        keep_above = self._state.get("pip_keep_above", pip_cfg.keep_above_default)
+
+        self._pip_window = PipWindow(
+            self,
+            geometry=self._state["pip"],
+            opacity=opacity,
+            keep_above=keep_above,
+            corner=self._state.get("pip_corner", pip_cfg.corner),
+            pip_cfg=pip_cfg,
+            on_restore=self._exit_pip,
+            on_geometry_changed=self._on_pip_geometry_changed,
+            on_keep_above_changed=self._on_pip_keep_above_changed,
+            on_opacity_changed=self._on_pip_opacity_changed,
+        )
+        self._capture.attach_video_widget(self._pip_window.picture)
+        self._pip_window.set_status(self._video_status_text())
+        self._pip_window.present()
+        self.hide()
+        save_window_state(self._state)
+
+    def _exit_pip(self, *, restore_main: bool = True) -> None:
+        if self._pip_window is not None:
+            self._pip_window.destroy_window()
+            self._pip_window = None
+
+        self._capture.attach_video_widget(self._video.video_host)
+        self._mode = MODE_NORMAL
+        self._state["last_mode"] = MODE_NORMAL
+        self._compact_header.set_pip_active(False)
+
+        if not restore_main:
+            return
+
+        self.set_opacity(1.0)
+        self._chrome.set_enabled(self._config.window.chrome_auto_hide)
+        geo = self._saved_normal or self._state["normal"]
+        self._restore_normal_geometry(geo, initial=False)
+        self._sync_normal_size_constraints()
+        self.present()
+        self._video.set_status(self._video_status_text())
+        if self._config.window.chrome_auto_hide:
+            GLib.idle_add(lambda: (self._chrome.schedule_hide(), False)[1])
+        save_window_state(self._state)
+
+    def _on_pip_geometry_changed(self, geo: SavedGeometry) -> None:
+        self._state["pip"] = geo
+        save_window_state(self._state)
+
+    def _on_pip_keep_above_changed(self, keep_above: bool) -> None:
+        self._state["pip_keep_above"] = keep_above
+        save_window_state(self._state)
+
+    def _on_pip_opacity_changed(self, opacity: float) -> None:
+        self._state["pip_opacity"] = opacity
+        save_window_state(self._state)
+
+    def _video_status_text(self) -> str | None:
+        overlay = self._video._status_overlay
+        if overlay.get_visible():
+            return overlay.get_text()
+        return None
 
     def toggle_fullscreen(self) -> None:
         if self._mode == MODE_FULLSCREEN:
@@ -1280,16 +1446,16 @@ class MainWindow(Adw.ApplicationWindow):
             self._apply_mode(MODE_FULLSCREEN)
 
     def _apply_mode(self, mode: str, initial: bool = False) -> None:
+        if mode == MODE_PIP:
+            if initial:
+                self._enter_pip()
+            return
+
+        if self._mode == MODE_PIP and mode != MODE_PIP:
+            self._exit_pip()
+
         if not initial and mode != MODE_FULLSCREEN:
             self._persist_geometry()
-
-        if mode == MODE_PIP and self._mode == MODE_NORMAL:
-            self._saved_normal = SavedGeometry(
-                self.get_width(),
-                self.get_height(),
-                *_window_xy(self),
-                self.is_maximized(),
-            )
 
         self._mode = mode
         self._state["last_mode"] = mode
@@ -1297,7 +1463,6 @@ class MainWindow(Adw.ApplicationWindow):
         if mode == MODE_FULLSCREEN:
             self._chrome.cancel()
             self._headerbar.set_visible(False)
-            self._pip_bar.set_visible(False)
             self._control_shell.force_show()
             self._chrome.set_enabled(self._config.window.chrome_auto_hide)
             self.fullscreen()
@@ -1306,48 +1471,14 @@ class MainWindow(Adw.ApplicationWindow):
             return
 
         self.unfullscreen()
-        self._headerbar.set_visible(mode != MODE_PIP)
-        self._pip_bar.set_visible(mode == MODE_PIP)
+        self._headerbar.set_visible(True)
         self._control_shell.force_show()
-
-        if mode == MODE_PIP:
-            self._chrome.set_enabled(False)
-            self._chrome.cancel()
-            self.set_decorated(True)
-            self.set_opacity(self._state.get("pip_opacity", 1.0))
-            pip_cfg = self._config.window.pip
-            self.set_size_request(pip_cfg.min_width, pip_cfg.min_height)
-            geo = self._state["pip"]
-            self.set_default_size(geo.width, geo.height)
-            monitor = self.get_display().get_monitors().get_item(geo.monitor)
-            if monitor is None:
-                monitor = self.get_display().get_monitors().get_item(0)
-            if monitor is not None:
-                mg = monitor.get_geometry()
-                corner = self._state.get("pip_corner", "bottom-right")
-                if geo.x <= 0 and geo.y <= 0 and initial:
-                    x, y = pip_corner_position(
-                        corner, geo.width, geo.height, mg, self._config.window.pip.margin_px
-                    )
-                else:
-                    x, y = geo.x, geo.y
-                GLib.idle_add(lambda x=x, y=y: (_window_move(self, x, y), False)[1])
-        else:
-            self._chrome.set_enabled(self._config.window.chrome_auto_hide)
-            self.set_opacity(1.0)
-            self.set_size_request(480, window_height_for_width(480))
-            geo = self._saved_normal or self._state["normal"]
-            if geo.x < 0 or geo.y < 0:
-                geo = compute_initial_geometry(self.get_display())
-            self.set_default_size(geo.width, geo.height)
-            if geo.maximized:
-                self.maximize()
-            else:
-                self.unmaximize()
-                nx, ny = geo.x, geo.y
-                GLib.idle_add(lambda x=nx, y=ny: (_window_move(self, x, y), False)[1])
-            if not initial and self._config.window.chrome_auto_hide:
-                GLib.idle_add(lambda: (self._chrome.schedule_hide(), False)[1])
+        self._chrome.set_enabled(self._config.window.chrome_auto_hide)
+        self.set_opacity(1.0)
+        self._sync_normal_size_constraints()
+        self._restore_normal_geometry(self._state["normal"], initial=initial)
+        if not initial and self._config.window.chrome_auto_hide:
+            GLib.idle_add(lambda: (self._chrome.schedule_hide(), False)[1])
 
         if not initial:
             save_window_state(self._state)
@@ -1360,6 +1491,7 @@ class AndroidTvApp(Adw.Application):
         self._window: MainWindow | None = None
         self._creating_window = False
         self._diagnostics = DiagnosticsServer(self._diagnostics_backend)
+        self.mpris = CaptureMprisController()
         self.connect("activate", self._on_activate)
 
     def _diagnostics_backend(self) -> AppDiagnosticsBackend | None:
@@ -1369,19 +1501,26 @@ class AndroidTvApp(Adw.Application):
         return window._diagnostics_backend
 
     def _on_window_destroy(self, *_args) -> None:
+        note_user_quit()
+        self.mpris.stop()
         self._diagnostics.stop()
         self._window = None
         self.quit()
 
     def _on_quit_requested(self, *_args) -> None:
+        note_user_quit()
         if self._window is not None and self._window._settings_dialog is not None:
             self._window._settings_dialog.close()
+        self.mpris.stop()
         self._diagnostics.stop()
         self.quit()
 
     def _on_activate(self, _app: Adw.Application) -> None:
         if self._window is not None:
-            self._window.present()
+            if self._window._pip_window is not None:
+                self._window._pip_window.present()
+            else:
+                self._window.present()
             return
         if self._creating_window:
             return
@@ -1399,6 +1538,7 @@ class AndroidTvApp(Adw.Application):
     def do_startup(self) -> None:
         Adw.Application.do_startup(self)
         self._diagnostics.start()
+        self.mpris.start()
 
         quit_action = Gio.SimpleAction.new("quit", None)
         quit_action.connect("activate", self._on_quit_requested)
@@ -1448,9 +1588,65 @@ class AndroidTvApp(Adw.Application):
               border-radius: 14px;
               padding: 6px 10px;
             }
-            .pip-grip-bar {
+            .pip-window {
+              background: black;
+            }
+            .pip-controls {
+              margin: 6px;
+            }
+            .pip-controls-bar {
+              background: alpha(black, 0.62);
+              border-radius: 8px;
               padding: 2px 6px;
+            }
+            .pip-opacity-box {
+              padding: 0 2px;
+            }
+            .pip-opacity-label {
+              color: alpha(white, 0.78);
+              font-size: 0.72rem;
+              min-width: 2.2em;
+            }
+            .pip-opacity-scale {
+              margin: 0 2px;
+            }
+            .pip-opacity-scale trough {
+              background: alpha(white, 0.14);
+              border-radius: 999px;
+              min-height: 4px;
+            }
+            .pip-opacity-scale highlight {
+              background: alpha(white, 0.52);
+              border-radius: 999px;
+            }
+            .pip-opacity-scale slider {
+              min-width: 12px;
+              min-height: 12px;
+              background: alpha(white, 0.95);
+              border-radius: 999px;
+            }
+            .pip-controls-sep {
+              margin: 4px 2px;
+              background: alpha(white, 0.18);
+              min-width: 1px;
+            }
+            .pip-control-btn {
+              min-width: 28px;
               min-height: 28px;
+              padding: 2px;
+              border-radius: 6px;
+              color: alpha(white, 0.92);
+            }
+            .pip-control-btn:hover {
+              background: alpha(white, 0.16);
+            }
+            .pip-control-btn:active {
+              background: alpha(white, 0.24);
+            }
+            .pip-status {
+              background: alpha(black, 0.65);
+              padding: 6px 10px;
+              border-radius: 8px;
             }
             .control-expand-pill {
               background: alpha(black, 0.72);

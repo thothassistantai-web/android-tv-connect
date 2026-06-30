@@ -8,7 +8,6 @@ import os
 import socket
 import threading
 from collections import deque
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -25,7 +24,8 @@ from .audio_source_test import (
 )
 from .branding import VERSION
 from .capture_device import (
-    build_audio_source_segment,
+    build_live_audio_pipeline,
+    build_audio_sink_segment,
     capture_device_status,
     invalidate_capture_cache,
     pipewiresrc_available,
@@ -60,12 +60,13 @@ class DiagnosticsBackend(Protocol):
     def diagnostics_capture_restart(self) -> dict[str, Any]: ...
 
 
-@dataclass
 class RingBufferLogHandler(logging.Handler):
     """Retain the last *capacity* formatted log lines for diagnostics queries."""
 
-    capacity: int = 500
-    _lines: deque[str] = field(default_factory=deque, init=False)
+    def __init__(self, capacity: int = 500) -> None:
+        super().__init__()
+        self.capacity = capacity
+        self._lines: deque[str] = deque()
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -142,9 +143,7 @@ def format_response(*, ok: bool, data: Any = None, error: str = "") -> str:
 
 
 def _pipeline_element_for_device(device: str) -> str:
-    segment = build_audio_source_segment(device)
-    if "pipewiresrc" in segment:
-        return "pipewiresrc"
+    segment = build_live_audio_pipeline(device)
     if "pulsesrc" in segment:
         return "pulsesrc"
     return "unknown"
@@ -225,7 +224,7 @@ class AppDiagnosticsBackend:
                 "audio_device_effective": effective_audio,
                 "pipeline_element": element,
                 "pipewiresrc_installed": pipewiresrc_available(),
-                "sink": "autoaudiosink",
+                "sink": "pulsesink",
                 "usb_present": usb_status.usb_present,
                 "signal_levels": None,
             },

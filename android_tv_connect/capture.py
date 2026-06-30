@@ -15,8 +15,10 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib, Gst
 
 from .capture_device import (
+    build_audio_sink_segment,
     build_audio_source_segment,
     capture_device_status,
+    ensure_capture_playback_unmuted,
     invalidate_capture_cache,
     is_capture_usb_present,
     resolve_audio_device,
@@ -130,7 +132,7 @@ class CapturePipeline:
             return ""
         return (
             f"{build_audio_source_segment(device)}"
-            f"autoaudiosink sync=false"
+            f"{build_audio_sink_segment()}"
         )
 
     def attach_video_widget(self, picture) -> None:
@@ -298,6 +300,11 @@ class CapturePipeline:
                 )
                 self._teardown_audio_pipeline()
             else:
+                sink = self._audio_pipeline.get_by_name("audiosink")
+                if sink is not None:
+                    sink.set_property("mute", False)
+                    sink.set_property("volume", 1.0)
+                ensure_capture_playback_unmuted()
                 LOG.info("Audio capture started on %s", self._effective_audio_device)
         else:
             LOG.warning("Audio pipeline unavailable; continuing video-only")
@@ -551,6 +558,28 @@ class CapturePipeline:
     @property
     def effective_audio_device(self) -> str | None:
         return self._effective_audio_device
+
+    def get_audio_volume(self) -> float | None:
+        """Return capture playback volume (0.0–1.0) when audio pipeline is active."""
+        pipeline = self._audio_pipeline
+        if pipeline is None:
+            return None
+        sink = pipeline.get_by_name("audiosink")
+        if sink is None:
+            return None
+        return float(sink.get_property("volume"))
+
+    def set_audio_volume(self, volume: float) -> bool:
+        """Set capture playback volume (0.0–1.0) on the active audio sink."""
+        pipeline = self._audio_pipeline
+        if pipeline is None:
+            return False
+        sink = pipeline.get_by_name("audiosink")
+        if sink is None:
+            return False
+        clamped = max(0.0, min(1.0, volume))
+        sink.set_property("volume", clamped)
+        return True
 
     @staticmethod
     def _stream_params(config: CaptureConfig) -> tuple:

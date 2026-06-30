@@ -14,13 +14,39 @@ from .adb_client import AdbClient
 from .branding import APP_NAME, VERSION
 from .capture_device import is_capture_device_available
 from .settings_store import load_config
-from .singleton import cleanup_stale_lock, clear_ui_pid, is_ui_running, note_ui_pid
+from .singleton import (
+    cleanup_stale_lock,
+    clear_ui_pid,
+    clear_user_quit,
+    is_ui_running,
+    is_user_quit_active,
+    note_ui_pid,
+    note_user_quit,
+    stop_watch_service,
+)
 from .window import AndroidTvApp
 
 LOG = logging.getLogger(__name__)
 
 _LAUNCH_COOLDOWN_S = 8.0
 _last_launch_at = 0.0
+
+
+def should_auto_launch_ui(
+    *,
+    devices_ready: bool,
+    ui_running: bool,
+    user_quit: bool,
+    seconds_since_last_launch: float,
+    cooldown_s: float = _LAUNCH_COOLDOWN_S,
+) -> bool:
+    """Whether watch mode should spawn the GTK app."""
+    return (
+        devices_ready
+        and not ui_running
+        and not user_quit
+        and seconds_since_last_launch >= cooldown_s
+    )
 
 
 def _adb_ready(config) -> bool:
@@ -46,6 +72,8 @@ def run_watch() -> int:
     poll = config.watch_poll_interval_s
     debounce = config.watch_disconnect_debounce_s
 
+    clear_user_quit()
+
     if not config.watch_autostart_enabled:
         LOG.info("Watch mode disabled in settings")
         while True:
@@ -61,9 +89,15 @@ def run_watch() -> int:
             LOG.warning("ADB connect timed out during watch poll")
             ready = False
         running = is_ui_running()
+        user_quit = is_user_quit_active()
         now = time.monotonic()
 
-        if ready and not running and (now - _last_launch_at) >= _LAUNCH_COOLDOWN_S:
+        if should_auto_launch_ui(
+            devices_ready=ready,
+            ui_running=running,
+            user_quit=user_quit,
+            seconds_since_last_launch=now - _last_launch_at,
+        ):
             LOG.info("Devices ready — launching UI")
             root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             env = os.environ.copy()
@@ -92,8 +126,19 @@ def run_watch() -> int:
         time.sleep(poll)
 
 
+def run_quit() -> int:
+    """Fully quit: suppress watcher auto-launch and stop the watch service."""
+    note_user_quit()
+    if stop_watch_service():
+        LOG.info("Stopped %s", "android-tv-connect-watch.service")
+    else:
+        LOG.info("Watch service not running or systemctl unavailable")
+    return 0
+
+
 def run_app() -> int:
     cleanup_stale_lock()
+    clear_user_quit()
     app = AndroidTvApp()
     note_ui_pid()
     try:
@@ -133,11 +178,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Watch for capture + ADB and auto-launch the UI",
     )
     parser.add_argument(
+        "--quit",
+        action="store_true",
+        help="Quit and stop auto-launch until you run atv-connect again or restart the watcher",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"{APP_NAME} {VERSION}",
     )
     args = parser.parse_args(argv)
+
+    if args.quit:
+        return run_quit()
 
     if args.watch:
         try:

@@ -37,7 +37,7 @@ class CompactHeader:
         header.set_title_widget(title)
 
         right = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
-        self._pip_btn = self._icon_btn("view-restore-symbolic", "PiP")
+        self._pip_btn = self._icon_btn("view-pin-symbolic", "Picture-in-Picture")
         self._fs_btn = self._icon_btn("fullscreen-symbolic", "Fullscreen")
         self._refresh_btn = self._icon_btn("view-refresh-symbolic", "Refresh & connect")
         self._refresh_btn.connect("clicked", self._on_refresh)
@@ -155,8 +155,23 @@ class CompactHeader:
         label.set_text(text)
 
     def update_tooltips(self, pip: str, fullscreen: str) -> None:
-        self._pip_btn.set_tooltip_text(f"Picture-in-Picture ({pip})")
+        active = self._pip_btn.has_css_class("pip-active")
+        if active:
+            self._pip_btn.set_tooltip_text(f"Exit Picture-in-Picture ({pip})")
+        else:
+            self._pip_btn.set_tooltip_text(f"Picture-in-Picture ({pip})")
         self._fs_btn.set_tooltip_text(f"Fullscreen ({fullscreen})")
+
+    def set_pip_active(self, active: bool) -> None:
+        image = self._pip_btn.get_child()
+        if active:
+            self._pip_btn.add_css_class("pip-active")
+            if isinstance(image, Gtk.Image):
+                image.set_from_icon_name("view-restore-symbolic")
+        else:
+            self._pip_btn.remove_css_class("pip-active")
+            if isinstance(image, Gtk.Image):
+                image.set_from_icon_name("view-pin-symbolic")
 
 
 class ChromeAutoHide:

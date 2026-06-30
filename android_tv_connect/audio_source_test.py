@@ -10,6 +10,7 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
+from .capture_device import build_audio_sink_segment
 from .media_enumeration import AudioSourceOption, enumerate_audio_sources
 
 LOG = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ def build_pulsesrc_audition_pipeline(device: str) -> str:
     return (
         f"pulsesrc device={name} ! "
         f"audioconvert ! audioresample ! "
-        f"autoaudiosink sync=false"
+        f"{build_audio_sink_segment()}"
     )
 
 

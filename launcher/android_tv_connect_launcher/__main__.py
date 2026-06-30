@@ -137,6 +137,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Forward to main app watch mode after update check",
     )
     parser.add_argument(
+        "--quit",
+        action="store_true",
+        help="Quit app and stop the auto-launch watcher",
+    )
+    parser.add_argument(
         "app_args",
         nargs=argparse.REMAINDER,
         help="Arguments forwarded to android_tv_connect",
@@ -146,6 +151,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.version:
         _print_versions()
         return 0
+
+    if args.quit:
+        forward = ["--quit"]
+        return _spawn_app(forward)
 
     check_only = args.check_updates and not args.watch and not args.app_args
     if check_only or args.apply_updates:

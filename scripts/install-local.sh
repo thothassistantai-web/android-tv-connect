@@ -258,6 +258,7 @@ Android TV Connect installed.
   Launcher module:  python3 -m android_tv_connect_launcher
   Data directory:   ${DATA_ROOT}
   Watcher service:  systemctl --user status android-tv-connect-watch
+  Quit (no relaunch): atv-connect --quit
 
 EOF
 }

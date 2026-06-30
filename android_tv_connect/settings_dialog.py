@@ -33,6 +33,7 @@ from .audio_source_test import (
 from .branding import APP_NAME, VERSION
 from .capture_device import list_viable_audio_sources, resolve_audio_device
 from .config import AppConfig, CaptureConfig, ScrcpyConfig
+from .geometry import PIP_OPACITY_MAX, PIP_OPACITY_MIN
 from .media_enumeration import (
     AudioSourceOption,
     VideoDeviceOption,
@@ -1115,12 +1116,16 @@ class SettingsDialog(Adw.Window):
             self._saved_config.window.aspect_ratio_locked,
         )
         self._pip_hide = self._switch_row(
-            "PiP bar auto-hide",
-            "Hide soft buttons in PiP when unfocused",
+            "PiP controls auto-hide",
+            "Hide window controls until you hover the PiP window",
             self._saved_config.window.pip.soft_bar_auto_hide,
         )
         self._pip_opacity = self._spin_row(
-            "PiP opacity", self._saved_config.window.pip.opacity, 0.05, 0.3, 1.0
+            "PiP opacity",
+            self._saved_config.window.pip.opacity,
+            0.05,
+            PIP_OPACITY_MIN,
+            PIP_OPACITY_MAX,
         )
         self._chrome_hide = self._switch_row(
             "Auto-hide chrome",

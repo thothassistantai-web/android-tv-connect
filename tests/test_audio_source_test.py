@@ -57,8 +57,9 @@ class AudioSourceTestTests(unittest.TestCase):
         self.assertIn("device=alsa_input.usb-MACROSILICON_USB3.0_Capture-02.analog-stereo", pipeline)
         self.assertIn("audioconvert", pipeline)
         self.assertIn("audioresample", pipeline)
-        self.assertIn("autoaudiosink", pipeline)
-        self.assertNotIn("pipewiresrc", pipeline)
+        self.assertIn("pulsesink", pipeline)
+        self.assertIn("mute=false", pipeline)
+        self.assertNotIn("autoaudiosink", pipeline)
         self.assertNotIn("num-buffers", pipeline)
 
     def test_audition_pid_file_constant(self) -> None:

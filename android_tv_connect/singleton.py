@@ -7,7 +7,11 @@ import subprocess
 from pathlib import Path
 
 from .branding import APP_ID as APP_DBUS_NAME
-LOCK_PATH = Path.home() / ".cache" / "android-tv-connect" / "ui.lock"
+
+CACHE_DIR = Path.home() / ".cache" / "android-tv-connect"
+LOCK_PATH = CACHE_DIR / "ui.lock"
+USER_QUIT_PATH = CACHE_DIR / "user-quit"
+WATCH_SERVICE = "android-tv-connect-watch.service"
 
 
 def _lock_pid() -> int | None:
@@ -64,11 +68,11 @@ def _dbus_name_owned(name: str) -> bool:
 
 
 def _ui_process_argv(pid: int) -> str | None:
-  try:
-      raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-  except OSError:
-      return None
-  return raw.replace(b"\0", b" ").decode(errors="replace").strip()
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    return raw.replace(b"\0", b" ").decode(errors="replace").strip()
 
 
 def _process_running() -> bool:
@@ -115,3 +119,37 @@ def note_ui_pid(pid: int | None = None) -> None:
 
 def clear_ui_pid() -> None:
     cleanup_stale_lock()
+
+
+def note_user_quit() -> None:
+    """Mark that the user closed the app; the watcher skips auto-launch until cleared."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    USER_QUIT_PATH.write_text("1\n")
+
+
+def clear_user_quit() -> None:
+    """Allow the watcher to auto-launch again (manual launch or new watch session)."""
+    try:
+        USER_QUIT_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def is_user_quit_active() -> bool:
+    """Return True when the user explicitly quit during the current watch session."""
+    return USER_QUIT_PATH.is_file()
+
+
+def stop_watch_service() -> bool:
+    """Stop the systemd user watcher."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "stop", WATCH_SERVICE],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
